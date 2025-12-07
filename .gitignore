@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Environment Variables (資安關鍵！)
+.env
+
+# Data Lake (資料太大不要上傳)
+data/
+
+
+
+.DS_Store
+x*
+*.log
