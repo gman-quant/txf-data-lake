@@ -22,6 +22,15 @@ class ColorScheme:
     _RED   = '#ef5350'
     _GREEN = '#26a69a'
 
+    # 🟢 [全家桶配色]
+    COLOR_MA5   = '#FFFFFF'  # 純白 (極短線)
+    COLOR_MA10  = '#FFFF00'  # 黃色 (短線)
+    COLOR_MA20  = '#00BFFF'  # 深天藍 (月線 - 控盤)
+    COLOR_MA60  = '#FFD700'  # 金色 (季線 - 生命線)
+    COLOR_MA120 = '#FF4500'  # 橘紅 (半年線 - 景氣)
+    COLOR_MA240 = '#A9A9A9'  # 暗灰 (年線 - 牛熊)
+    COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
+
     @staticmethod
     def _darken(hex_color: str, factor: float) -> str:
         """Hex 轉暗 (RGB 乘法運算)"""
@@ -71,7 +80,7 @@ class ColorScheme:
     
     # 圖例與十字線配置
     LEGEND_COLOR = '#FFFFFF'
-    LEGEND_SIZE  = 16
+    LEGEND_SIZE  = 14
     CROSSHAIR    = {'color': '#CCCCCC', 'bg': '#4c525e', 'style': 1} # style: 1=Dash, 0=Solid
 
     @classmethod
