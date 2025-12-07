@@ -79,7 +79,13 @@ def view_kbars(symbol='TXF', start_date='2025-12-05', end_date=None, timeframe='
             return
             
         print(f"📦 Concatenating {len(df_list)} daily files...")
-        df = pl.concat(df_list).sort("ts")
+        # 🟢 [修正] 加入 .unique() 去重邏輯
+        # 這是讓圖表復活的關鍵！
+        df = (
+            pl.concat(df_list)
+            .unique(subset=["ts"], keep="last") # 根據時間去重，保留最新的一筆
+            .sort("ts")                         # 確保時間嚴格遞增
+        )
 
     # === 資料處理邏輯 (通用) ===
 
@@ -200,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument('--end_date', type=str, default=None, help="End Date (YYYY-MM-DD). If not set, only show start_date.")
 
     # Timeframe
-    parser.add_argument('--tf', type=str, choices=['1d', '1h', '60m', '5m', '1m', '5s'], default='1h', help="Timeframe (default: 1h)")
+    parser.add_argument('--tf', type=str, choices=['1d', '1h', '60m', '5m', '1m', '5s'], default='5m', help="Timeframe (default: 5m)")
     
     # Combine
     parser.add_argument('--combine', action='store_true', help="Combine Day/Night sessions (default: False)")
