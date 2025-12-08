@@ -1,7 +1,7 @@
 # core/resampler.py
 import polars as pl
 from datetime import time
-from config.calendar_rules import get_session_expression
+from config.calendar_rules import get_session_expression, DAY_START
 
 def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     
@@ -18,7 +18,7 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     q = tick_df.lazy().with_columns([
         get_session_expression("ts"),
         
-        pl.when(pl.col("ts").dt.time() < time(8, 0)) # 只要是早上8點前
+        pl.when(pl.col("ts").dt.time() < DAY_START) # 只要是早上8點前
           .then(pl.col("ts").dt.offset_by("-1d"))  # 日期退一天
           .otherwise(pl.col("ts"))                 # 其他維持原樣
           .dt.date()                               # 取出日期部分
