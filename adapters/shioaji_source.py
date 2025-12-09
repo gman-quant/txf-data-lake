@@ -80,5 +80,8 @@ class ShioajiSource:
         
         return df
     
+    def report_usage(self):
+        print(self.api.usage())
+
     def logout(self):
         self.api.logout()

@@ -40,7 +40,12 @@ def main():
     # [L]oad/Visualize: 繪圖
     title_suffix = f"({args.date}~{args.end_date})" + (" [Comb]" if args.combine else "")
     viewer = ChartBuilder(args.symbol, args.tf, title_suffix)
-    viewer.plot(df_processed)
+    try:
+        viewer.plot(df_processed)
+    except KeyboardInterrupt:
+        # 當偵測到 Ctrl+C 時，優雅地結束
+        print("\n👋 Chart closed by user. Exiting...")
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()

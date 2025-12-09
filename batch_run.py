@@ -33,11 +33,12 @@ def run_batch_job(start_date, end_date):
     finally:
         # 4. 全部跑完後，才執行最後一次登出
         print("\n🎉 Batch Job Completed. Logging out...")
+        source.report_usage()
         source.logout()
 
 if __name__ == "__main__":
     # 設定您要補資料的區間
-    START = "2025-06-01"
-    END   = "2025-12-06"
+    START = "2024-06-01"
+    END   = "2024-06-30"
     
     run_batch_job(START, END)
