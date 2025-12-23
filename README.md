@@ -108,7 +108,7 @@ python view_chart.py --date 2025-12-05 --tf 1m
 想看連續趨勢，例如 11月整個月的走勢：
 
 ```bash
-python view_chart.py --date 2025-11-01 --end_date 2025-11-30 --tf 1h
+python view_chart.py --date 2025-11-01 --end-date 2025-11-30 --tf 1h
 ```
 
 #### 🟢 日線圖 (合併日夜盤)
@@ -117,21 +117,21 @@ python view_chart.py --date 2025-11-01 --end_date 2025-11-30 --tf 1h
 
 ```bash
 # --combine 參數會自動執行聚合邏輯
-python view_chart.py --date 2025-01-01 --end_date 2025-12-31 --tf 1d
+python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d
 ```
 
 將「日盤」與「夜盤」合併為單一根 K 棒，適合觀察大波段趨勢：
 
 ```bash
 # --combine 參數會自動執行聚合邏輯
-python view_chart.py --date 2025-01-01 --end_date 2025-12-31 --tf 1d --combine
+python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combine
 ```
 
 #### 🟢 查看加權指數 (TSE)
 
 ```bash
 # --sybbol choices: TSE, TXF(default)
-python view_chart.py --symbol TSE --date 2025-01-01 --end_date 2025-12-31  --tf 1d
+python view_chart.py --symbol TSE --date 2025-01-01 --end-date 2025-12-31  --tf 1d
 ```
 
 -----

@@ -110,6 +110,7 @@ def run_pipeline(date_str, shared_source=None):
     finally:
         # 只有真正連線過才需要登出
         if is_local_session and source.is_connected:
+            source.report_usage()
             source.logout()
             print("👋 Shioaji Logout.")
         else:

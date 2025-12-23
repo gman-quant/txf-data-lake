@@ -16,7 +16,7 @@ def main():
     parser = argparse.ArgumentParser(description="TXF Interactive Chart Viewer")
     parser.add_argument('--symbol', type=str, default='TXF', help="商品代碼")
     parser.add_argument('--date', type=str, default=datetime.now().strftime('%Y-%m-%d'), help="開始日期")
-    parser.add_argument('--end_date', type=str, default=None, help="結束日期")
+    parser.add_argument('--end-date', type=str, default=None, help="結束日期")
     parser.add_argument('--tf', type=str, default='5m', help="K棒週期")
     parser.add_argument('--combine', action='store_true', help="合併日夜盤")
     args = parser.parse_args()
