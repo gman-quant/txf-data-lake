@@ -45,80 +45,66 @@ nano ~/Library/LaunchAgents/com.garrett.shioaji.txf_tse_collector.plist
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-
-    <!-- 唯一識別 -->
     <key>Label</key>
     <string>com.garrett.shioaji.txf_tse_collector</string>
 
-    <!-- 執行內容 -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
         <string>
             <![CDATA[
-            set -e
-
-            DOW=$(date +%u)      # 1=Mon ... 6=Sat 7=Sun
-            HOUR=$(date +%H)
-            MIN=$(date +%M)
-
+            # 取得目前的星期 (1=Mon, 6=Sat, 7=Sun)
+            DOW=$(date +%u)
+            HM=$(date +%H%M)
             SHOULD_RUN=0
 
-            # 週一～週五 13:46
-            if [[ "$DOW" -ge 1 && "$DOW" -le 5 && "$HOUR" == "13" && "$MIN" == "46" ]]; then
+            # --- A. 週一至週五的 13:46 (日盤收盤 ETL) ---
+            if [[ "$DOW" -le 5 && "$HM" == "1346" ]]; then
                 SHOULD_RUN=1
             fi
 
-            # 週六 05:01
-            if [[ "$DOW" == "6" && "$HOUR" == "05" && "$MIN" == "01" ]]; then
+            # --- B. 週六的邏輯 (夜盤結算 ETL) ---
+            # 1. 或是剛好 05:01 (由 StartCalendarInterval 觸發)
+            # 2. 或是時間已經超過 05:01 (由 RunAtLoad 在登入時觸發)
+            if [[ "$DOW" -eq 6 && "$HM" -ge "0501" ]]; then
                 SHOULD_RUN=1
             fi
 
-            # 週六登入（RunAtLoad）
-            if [[ "$DOW" == "6" && "$HOUR" != "05" ]]; then
-                SHOULD_RUN=1
-            fi
-
+            # --- C. 執行判定 ---
             if [[ "$SHOULD_RUN" == "1" ]]; then
-                cd /Users/gtai/Projects/txf-data-lake
-                source .venv/bin/activate
-                python main_etl.py
+                echo "[$(date)] >>> 啟動 ETL 任務 (DOW: $DOW, HM: $HM) <<<"
+                cd /Users/gtai/Projects/txf-data-lake || exit 1
+                # 使用絕對路徑確保在 Monterey 環境 100% 成功
+                ./.venv/bin/python main_etl.py
             else
-                echo "[SKIP] Not a scheduled ETL window"
+                echo "[$(date)] [SKIP] 時段未到 (DOW: $DOW, HM: $HM)，不執行動作。"
             fi
             ]]>
         </string>
     </array>
 
-    <!-- 定時觸發 -->
     <key>StartCalendarInterval</key>
     <array>
-        <!-- 週一～週五 13:46 -->
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
         <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
         <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
         <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
         <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
-        <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>13</integer><key>Minute</key><integer>46</integer></dict>
 
-        <!-- 週六 05:01 -->
-        <dict><key>Weekday</key><integer>7</integer><key>Hour</key><integer>5</integer><key>Minute</key><integer>1</integer></dict>
+        <dict><key>Weekday</key><integer>6</integer><key>Hour</key><integer>5</integer><key>Minute</key><integer>1</integer></dict>
     </array>
 
-    <!-- 登入時觸發（僅週六會真的跑） -->
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- log -->
     <key>StandardOutPath</key>
     <string>/tmp/txf_tse_collector.out.log</string>
     <key>StandardErrorPath</key>
     <string>/tmp/txf_tse_collector.err.log</string>
-
 </dict>
 </plist>
 ```
