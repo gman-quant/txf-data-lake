@@ -33,6 +33,13 @@
 ### 2\. 安裝依賴套件
 
 ```bash
+python -m venv .venv
+
+. .venv/bin/activate # linux
+. .venv/Scripts/activate # windows
+
+python.exe -m pip install --upgrade pip
+
 pip install -r requirements.txt
 ```
 
