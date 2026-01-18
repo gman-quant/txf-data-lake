@@ -10,7 +10,8 @@ API_KEY = os.environ.get("SHIOAJI_API_KEY")
 SECRET_KEY = os.environ.get("SHIOAJI_SECRET_KEY")
 
 # 資料儲存根目錄
-DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+# DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'txf-data')
+DATA_ROOT = os.environ.get("DATA_ROOT", r"D:\txf-data")
 
 # 定義要轉檔的週期列表
 # 5s:極短線, 1m:原子K, 5m:波段, 1h:長線, 1d:日線
