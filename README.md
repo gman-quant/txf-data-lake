@@ -33,14 +33,12 @@
 ### 2\. 安裝依賴套件
 
 ```bash
-python -m venv .venv
+uv venv
 
 . .venv/bin/activate # linux
 . .venv/Scripts/activate # windows
 
-python.exe -m pip install --upgrade pip
-
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 ### 3\. 設定帳號 (Configuration)
