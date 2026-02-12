@@ -38,7 +38,7 @@ def run_batch_job(start_date, end_date):
 
 if __name__ == "__main__":
     # 設定您要補資料的區間
-    START = "2026-01-16"
-    END   = "2026-01-19"
+    START = "2026-02-06"
+    END   = "2026-02-06"
     
     run_batch_job(START, END)
