@@ -11,7 +11,7 @@ class ShioajiSource:
 
     def connect(self):
         if not self.is_connected:
-            accounts = self.api.login(API_KEY, SECRET_KEY)
+            accounts = self.api.login(API_KEY, SECRET_KEY) # pyright: ignore[reportArgumentType]
             print(f"✅ Shioaji Login: {accounts[0].person_id}")
             self.is_connected = True
 

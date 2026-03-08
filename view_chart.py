@@ -76,7 +76,7 @@ def main():
     parser.add_argument('--date', type=str, default=datetime.now().strftime('%Y-%m-%d'), help="開始日期")
     parser.add_argument('--end-date', type=str, default=None, help="結束日期")
     parser.add_argument('--tf', type=str, default='5m', help="K棒週期")
-    parser.add_argument('--combine', action='store_true', help="合併日夜盤")
+    parser.add_argument('--combined', action='store_true', help="合併日夜盤")
     # 新增校正開關
     parser.add_argument('--adjust', action='store_true', help="顯示校正後的連續價格")
     args = parser.parse_args()
@@ -102,11 +102,11 @@ def main():
 
     # [T]ransform: 資料運算 (顏色、指標)
     print("⚡️ Processing...")
-    df_processed = DataProcessor.process_data(df_raw, args.tf, args.combine)
+    df_processed = DataProcessor.process_data(df_raw, args.tf, args.combined)
 
     # [L]oad/Visualize: 繪圖
     title_suffix = f"({args.date}~{args.end_date})"
-    if args.combine: title_suffix += " [Comb]"
+    if args.combined: title_suffix += " [Comb]"
     if args.adjust: title_suffix += " [ADJ]"
     
     viewer = ChartBuilder(args.symbol, args.tf, title_suffix)

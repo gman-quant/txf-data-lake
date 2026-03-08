@@ -121,15 +121,15 @@ python view_chart.py --date 2025-01-01 --end-date 2026-12-31 --tf 1h
 預設日夜盤分開：
 
 ```bash
-# --combine 參數會自動執行聚合邏輯
+# --combined 參數會自動執行聚合邏輯
 python view_chart.py --date 2020-01-01 --end-date 2026-12-31 --tf 1d
 ```
 
 將「日盤」與「夜盤」合併為單一根 K 棒，適合觀察大波段趨勢：
 
 ```bash
-# --combine 參數會自動執行聚合邏輯
-python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combine
+# --combined 參數會自動執行聚合邏輯
+python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combined
 ```
 
 #### 🟢 查看加權指數 (TSE)

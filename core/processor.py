@@ -35,7 +35,7 @@ class DataProcessor:
         )
 
         ma_multiplier = 2 if (timeframe == '1d' and not combine_sessions) else 1
-        ma_days = [5, 10, 20, 60, 120, 240]
+        ma_days = list(ColorScheme.SMA_SETTINGS.keys())
         ma_exprs = [pl.col("close").rolling_mean(d * ma_multiplier).alias(f"ma{d}") for d in ma_days]
 
         # 4. 執行向量運算 (分段執行，確保欄位依序產生)

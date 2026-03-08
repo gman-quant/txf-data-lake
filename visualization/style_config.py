@@ -22,13 +22,19 @@ class ColorScheme:
     _RED   = '#ef5350'
     _GREEN = '#26a69a'
 
-    # 🟢 [全家桶配色]
-    COLOR_MA5   = '#FFFFFF'  # 純白 (極短線)
-    COLOR_MA10  = '#FFFF00'  # 黃色 (短線)
-    COLOR_MA20  = '#00BFFF'  # 深天藍 (月線 - 控盤)
-    COLOR_MA60  = '#FFD700'  # 金色 (季線 - 生命線)
-    COLOR_MA120 = '#FF4500'  # 橘紅 (半年線 - 景氣)
-    COLOR_MA240 = '#A9A9A9'  # 暗灰 (年線 - 牛熊)
+    # 🟢 [全家桶配色] (動態設定)
+    SMA_SETTINGS = {
+        5:   {'color': '#FFFFFF', 'width': 1},  # 白 (極短線，最靈敏)
+        10:  {'color': '#FFFF00', 'width': 1},  # 黃 (短線指標)
+        20:  {'color': '#00BFFF', 'width': 2},  # 深天藍 (月線 - 控盤)
+        30:  {'color': '#FF69B4', 'width': 1},  # 亮粉紅 / 洋紅 (輔助波段)
+        40:  {'color': '#FFA500', 'width': 1},  # 亮橘色 (中線過渡)
+        50:  {'color': '#32CD32', 'width': 1},  # 萊姆綠 (中線區隔)
+        60:  {'color': '#FFD700', 'width': 2},  # 黃金色 (季線 - 生命線)
+        # 150: {'color': '#FF4500', 'width': 1},  # 橘紅 (半年線 - 景氣)
+        # 200: {'color': '#9370DB', 'width': 2},  # 中紫色 (年線 - 牛熊)
+    }
+
     COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
 
     @staticmethod
