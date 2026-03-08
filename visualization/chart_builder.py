@@ -35,9 +35,11 @@ class ChartBuilder:
         vol.set(df_volume)
         
         # 4. 全家桶指標繪製
-        # 根據設定檔動態載入 SMA
-        indicators = [(f'ma{period}', f'MA{period}', cfg['color'], cfg['width']) 
-                      for period, cfg in ColorScheme.SMA_SETTINGS.items()]
+        # 根據設定檔動態載入 MA
+        indicators = []
+        for period, cfg in ColorScheme.MA_SETTINGS.items():
+            ma_type = cfg.get('type', 'SMA')
+            indicators.append((f'ma{period}', f'{ma_type}{period}', cfg['color'], cfg['width']))
         
         # VWAP 維持獨立設定
         indicators.append(('vwap', 'VWAP', ColorScheme.COLOR_VWAP, 2))

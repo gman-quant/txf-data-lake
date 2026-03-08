@@ -35,8 +35,18 @@ class DataProcessor:
         )
 
         ma_multiplier = 2 if (timeframe == '1d' and not combine_sessions) else 1
-        ma_days = list(ColorScheme.SMA_SETTINGS.keys())
-        ma_exprs = [pl.col("close").rolling_mean(d * ma_multiplier).alias(f"ma{d}") for d in ma_days]
+        ma_days = list(ColorScheme.MA_SETTINGS.keys())
+        
+        ma_exprs = []
+        for d in ma_days:
+            period = d * ma_multiplier
+            # 取得該週期的均線類型，預設為 'SMA'
+            ma_type = ColorScheme.MA_SETTINGS[d].get('type', 'SMA')
+            
+            if ma_type == 'EMA':
+                ma_exprs.append(pl.col("close").ewm_mean(span=period, ignore_nulls=True).alias(f"ma{d}"))
+            else:
+                ma_exprs.append(pl.col("close").rolling_mean(period).alias(f"ma{d}"))
 
         # 4. 執行向量運算 (分段執行，確保欄位依序產生)
 

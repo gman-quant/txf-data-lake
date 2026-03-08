@@ -23,16 +23,19 @@ class ColorScheme:
     _GREEN = '#26a69a'
 
     # 🟢 [全家桶配色] (動態設定)
-    SMA_SETTINGS = {
-        5:   {'color': '#FFFFFF', 'width': 1},  # 白 (極短線，最靈敏)
-        10:  {'color': '#FFFF00', 'width': 1},  # 黃 (短線指標)
-        20:  {'color': '#00BFFF', 'width': 2},  # 深天藍 (月線 - 控盤)
-        30:  {'color': '#FF69B4', 'width': 1},  # 亮粉紅 / 洋紅 (輔助波段)
-        40:  {'color': '#FFA500', 'width': 1},  # 亮橘色 (中線過渡)
-        50:  {'color': '#32CD32', 'width': 1},  # 萊姆綠 (中線區隔)
-        60:  {'color': '#FFD700', 'width': 2},  # 黃金色 (季線 - 生命線)
-        # 150: {'color': '#FF4500', 'width': 1},  # 橘紅 (半年線 - 景氣)
-        # 200: {'color': '#9370DB', 'width': 2},  # 中紫色 (年線 - 牛熊)
+    # 建議邏輯:
+    # 1. 關鍵防守線加粗 (width: 2) -> 21(月線), 60(季線)
+    # 2. 顏色層次: 極短線(白/黃) -> 短段(藍/粉) -> 中段(橘/綠) -> 長段(紅/紫)
+    MA_SETTINGS = {
+        5:   {'type': 'EMA', 'color': '#FFFFFF', 'width': 1},  # 白 (極短線 - 貼價)
+        8:   {'type': 'EMA', 'color': '#FFFF00', 'width': 1},  # 黃 (短線動能 - 費波那契)
+        13:  {'type': 'EMA', 'color': '#00BFFF', 'width': 1},  # 深天藍 (短波段 - 費波那契)
+        21:  {'type': 'EMA', 'color': '#FF69B4', 'width': 2},  # 亮粉紅 (小月線/短期控盤 - 關鍵加粗)
+        30:  {'type': 'EMA', 'color': '#FFA500', 'width': 1},  # 亮橘色 (中段過渡)
+        40:  {'type': 'EMA', 'color': '#32CD32', 'width': 1},  # 萊姆綠 (中線過渡區)
+        50:  {'type': 'EMA', 'color': '#00FA9A', 'width': 1},  # 春天綠 (中區隔/延續)
+        60:  {'type': 'EMA', 'color': '#FF4500', 'width': 2},  # 橘紅 (季線/生命線 - 關鍵加粗)
+        70:  {'type': 'EMA', 'color': '#9370DB', 'width': 1},  # 中紫色 (防守底線)
     }
 
     COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
