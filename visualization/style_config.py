@@ -34,8 +34,8 @@ class ColorScheme:
         30:  {'type': 'EMA', 'color': '#FFA500', 'width': 1},  # 亮橘色 (中段過渡)
         40:  {'type': 'EMA', 'color': '#32CD32', 'width': 1},  # 萊姆綠 (中線過渡區)
         50:  {'type': 'EMA', 'color': '#00FA9A', 'width': 1},  # 春天綠 (中區隔/延續)
-        60:  {'type': 'EMA', 'color': '#FF4500', 'width': 2},  # 橘紅 (季線/生命線 - 關鍵加粗)
-        70:  {'type': 'EMA', 'color': '#9370DB', 'width': 1},  # 中紫色 (防守底線)
+        60:  {'type': 'EMA', 'color': '#FF4500', 'width': 1},  # 橘紅 (季線/生命線 - 關鍵加粗)
+        59:  {'type': 'SMA', 'color': '#9370DB', 'width': 2},  # 中紫色 (防守底線)
     }
 
     COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)

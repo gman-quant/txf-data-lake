@@ -8,6 +8,7 @@ class ChartBuilder:
     負責繪圖與圖層管理
     """
     def __init__(self, symbol: str, timeframe: str, title_suffix: str = ""):
+        self.timeframe = timeframe
         self.chart = Chart(toolbox=True)
         ColorScheme.apply_theme(self.chart)
         self.chart.topbar.textbox('symbol', f'{symbol} {timeframe} {title_suffix}')
@@ -35,14 +36,15 @@ class ChartBuilder:
         vol.set(df_volume)
         
         # 4. 全家桶指標繪製
-        # 根據設定檔動態載入 MA
+        # 4. 全家桶指標繪製
         indicators = []
+        
         for period, cfg in ColorScheme.MA_SETTINGS.items():
             ma_type = cfg.get('type', 'SMA')
             indicators.append((f'ma{period}', f'{ma_type}{period}', cfg['color'], cfg['width']))
         
         # VWAP 維持獨立設定
-        indicators.append(('vwap', 'VWAP', ColorScheme.COLOR_VWAP, 2))
+        # indicators.append(('vwap', 'VWAP', ColorScheme.COLOR_VWAP, 2))
 
         print(f"🚀 Chart launching... ({len(df_kbars)} bars)")
 
@@ -55,6 +57,14 @@ class ChartBuilder:
                     line = self.chart.create_line(name=label, color=color, width=width)
                     line.set(line_data)
                     print(f"   - Added {label}")
+
+        # 根據需求：只有日線(1d)預設開啟，其他週期預設「隱藏」均線。
+        # 此舉讓使用者仍可以點擊圖例開啟顯示。
+        if self.timeframe != '1d':
+            for line in self.chart.lines():
+                # 遍歷目前建立的所有附加密碼線，並預設先隱藏。使用者後續可在右上角圖例手動點開。
+                # 注意：chart.lines() 包含所有創造出來的線(EMA, SMA)
+                line.hide_data()
 
         # 5. 啟動
         self.chart.fit()

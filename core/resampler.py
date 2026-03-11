@@ -87,3 +87,71 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     q = q.select(head_cols + tail_cols)
     
     return q.collect()
+
+
+def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
+    """
+    將低級別 K 棒 (例如 1m 或 1h) 加上動態重取樣為指定的目標週期 (例如 4h)
+    """
+    if df.is_empty():
+        return df
+
+    # 抓取 Symbol
+    symbol_val = None
+    if "symbol" in df.columns:
+        symbol_val = df["symbol"][0]
+
+    q = df.lazy()
+
+    aggs = [
+        pl.col("open").first().alias("open"),
+        pl.col("high").max().alias("high"),
+        pl.col("low").min().alias("low"),
+        pl.col("close").last().alias("close"),
+        pl.col("volume").sum().alias("volume")
+    ]
+
+    if "underlying_close" in df.columns:
+        aggs.append(pl.col("underlying_close").last().alias("underlying_close"))
+
+    # 動態聚合
+    q = (
+        q.sort("ts")
+        .group_by_dynamic(
+            "ts", 
+            every=timeframe, 
+            closed="left", 
+            label="left"
+        )
+        .agg(aggs)
+    )
+
+    # 重新計算 Session 與 Date
+    q = q.with_columns([
+        get_session_expression("ts"),
+        pl.when(pl.col("ts").dt.time() < DAY_START)
+          .then(pl.col("ts").dt.offset_by("-1d"))
+          .otherwise(pl.col("ts"))
+          .dt.date()
+          .alias("date")
+    ])
+
+    # 補回 Symbol
+    if symbol_val is not None:
+        q = q.with_columns(pl.lit(symbol_val).alias("symbol"))
+
+    # 通用過濾與整理欄位
+    q = q.filter(pl.col("volume") > 0)
+    
+    desired_order = [
+        "symbol", "date", "ts", "session",
+        "open", "high", "low", "close", "volume", "underlying_close"
+    ]
+    
+    current_cols = q.collect_schema().names()
+    head_cols = [c for c in desired_order if c in current_cols]
+    tail_cols = [c for c in current_cols if c not in head_cols]
+    
+    q = q.select(head_cols + tail_cols)
+    
+    return q.collect()
