@@ -58,8 +58,8 @@ def apply_adjustment(df, adj_table_path, timeframe):
             (pl.col("ts").dt.hour().is_in([13, 15]))
         )
         if not check_points.is_empty():
-            print("📊 [Transition Check] 1/21 結算日轉換：")
-            print(check_points.select(["ts", "close", "cum_delta"]))
+            print("[Check] [Transition Check] 1/21 Transition (CSV format):")
+            print(check_points.select(["ts", "close", "cum_delta"]).to_pandas().to_csv(index=False))
 
     price_cols = ["open", "high", "low", "close"]
     df_adjusted = df_adjusted.with_columns([
@@ -83,25 +83,25 @@ def main():
 
     if args.end_date is None: args.end_date = args.date
     
-    print(f"🔍 Task: {args.symbol} {args.tf} | {args.date} ~ {args.end_date} {'[Adjusted]' if args.adjust else '[Raw]'}")
+    print(f"[Task] {args.symbol} {args.tf} | {args.date} ~ {args.end_date} {'[Adjusted]' if args.adjust else '[Raw]'}")
 
     # 2. ETL 流程
     # [E]xtract: 讀取資料
     df_raw = DataLoader.load_kbars(args.symbol, args.tf, args.date, args.end_date)
     
     if df_raw.is_empty():
-        print("❌ Data not found.")
+        print("[Error] Data not found.")
         return
 
     # [A]djust: 價格校正 (在處理指標前執行)
     if args.adjust:
-        print("🔧 Applying price adjustments...")
+        print("[Adjust] Applying price adjustments...")
         # 指向你在 D 槽建立的數據中心
         ADJ_PATH = r"D:\txf-data\adjustments\txf_adjustment_table_final.csv"
         df_raw = apply_adjustment(df_raw, ADJ_PATH, args.tf)
 
     # [T]ransform: 資料運算 (顏色、指標)
-    print("⚡️ Processing...")
+    print("[Proc] Processing...")
     df_processed = DataProcessor.process_data(df_raw, args.tf, args.combined)
 
     # [L]oad/Visualize: 繪圖
@@ -113,7 +113,7 @@ def main():
     try:
         viewer.plot(df_processed)
     except KeyboardInterrupt:
-        print("\n👋 Chart closed by user. Exiting...")
+        print("\n[Info] Chart closed by user. Exiting...")
         sys.exit(0)
 
 if __name__ == "__main__":

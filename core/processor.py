@@ -1,6 +1,7 @@
 # core/processor.py
 import polars as pl
 from visualization.style_config import ColorScheme
+from config.calendar_rules import get_session_expression
 
 class DataProcessor:
     """
@@ -51,13 +52,14 @@ class DataProcessor:
         # 4. 執行向量運算 (分段執行，確保欄位依序產生)
 
         # Step A: 防呆補強 (處理聚合後 session 遺失 & 分時線 date 遺失)
-        if "session" not in df.columns:
+        # 如果是週線 (1w)，這根 K 棒代表了整個星期的交易，不需要區分日夜盤，強制設定為 Day (亮色)
+        if "session" not in df.columns or timeframe == '1w':
             df = df.with_columns(pl.lit("Day").alias("session"))
 
         df = df.with_columns([
             pl.col("ts").dt.date().alias("date_temp"),
             pl.col("date" if timeframe == '1d' and combine_sessions else "ts").dt.strftime(time_fmt).alias("time"),
-            pl.col("session").fill_null("Day"),
+            pl.col("session").fill_null(get_session_expression("ts")),
             (pl.col("close") >= pl.col("open")).alias("is_up")
         ])
 

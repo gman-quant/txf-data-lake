@@ -45,7 +45,14 @@ class DataLoader:
             return pl.DataFrame()
 
         # 2. 合併與初步過濾 (處理跨日重複)
-        df = pl.concat(df_list).unique(subset=["ts"], keep="last").sort("ts")
+        df = pl.concat(df_list, how="diagonal").unique(subset=["ts"], keep="last").sort("ts")
+        
+        # 確保 session 欄位存在且無 null (解決 how="diagonal" 產生的 null)
+        from config.calendar_rules import get_session_expression
+        if "session" in df.columns:
+            df = df.with_columns(pl.col("session").fill_null(get_session_expression("ts")))
+        else:
+            df = df.with_columns(get_session_expression("ts"))
         
         # 日線需額外過濾日期區間 (因為年檔包含整年)
         if base_tf == '1d':
@@ -56,5 +63,22 @@ class DataLoader:
         # 3. 動態重取樣 (如果 requested timeframe 不等於 base_tf)
         if timeframe != base_tf:
             df = resample_kbars(df, timeframe)
+            
+        # 4. 歷史資料修復 Patch: 確保 08:xx 開頭的 K 棒強制判定為 Day (日盤)
+        # 因為舊版 ETL 產生的歷史 parquet 可能會將 08:00 的 1h 標成 Night
+        if "session" in df.columns:
+            df = df.with_columns(
+                pl.when(pl.col("ts").dt.hour() == 8)
+                  .then(pl.lit("Day"))
+                  .otherwise(pl.col("session"))
+                  .alias("session")
+            )
+            # 強制補強：00:00~05:00 & 15:00~23:00 必定是 Night
+            df = df.with_columns(
+                pl.when(pl.col("ts").dt.hour().is_in([15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5]))
+                  .then(pl.lit("Night"))
+                  .otherwise(pl.col("session"))
+                  .alias("session")
+            )
             
         return df

@@ -62,9 +62,6 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
             )
             .agg(aggs)
         )
-        
-        # 🟢 [關鍵修復] 聚合後，Session 會消失，這裡必須再補算一次
-        q = q.with_columns(get_session_expression("ts"))
 
     # 5. 通用過濾
     q = q.filter(pl.col("volume") > 0)
@@ -108,12 +105,10 @@ def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         pl.col("high").max().alias("high"),
         pl.col("low").min().alias("low"),
         pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume")
+        pl.col("volume").sum().alias("volume"),
+        pl.col("session").first().alias("session")
     ]
-
-    if "underlying_close" in df.columns:
-        aggs.append(pl.col("underlying_close").last().alias("underlying_close"))
-
+    
     # 動態聚合
     q = (
         q.sort("ts")
@@ -126,9 +121,8 @@ def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         .agg(aggs)
     )
 
-    # 重新計算 Session 與 Date
+    # 重新計算 Date (Session 已經在 agg 中取得第一根基底 K 棒的狀態)
     q = q.with_columns([
-        get_session_expression("ts"),
         pl.when(pl.col("ts").dt.time() < DAY_START)
           .then(pl.col("ts").dt.offset_by("-1d"))
           .otherwise(pl.col("ts"))

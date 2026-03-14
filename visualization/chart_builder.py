@@ -15,7 +15,7 @@ class ChartBuilder:
 
     def plot(self, df: pl.DataFrame):
         if df.is_empty():
-            print("⚠️ No data to plot.")
+            print("[Warning] No data to plot.")
             return
 
         # 1. 基礎資料分流
@@ -43,10 +43,10 @@ class ChartBuilder:
             ma_type = cfg.get('type', 'SMA')
             indicators.append((f'ma{period}', f'{ma_type}{period}', cfg['color'], cfg['width']))
         
-        # VWAP 維持獨立設定
+        # vwap 維持獨立設定
         # indicators.append(('vwap', 'VWAP', ColorScheme.COLOR_VWAP, 2))
 
-        print(f"🚀 Chart launching... ({len(df_kbars)} bars)")
+        print(f"[Chart] Chart launching... ({len(df_kbars)} bars)")
 
         for col_name, label, color, width in indicators:
             if col_name in df.columns:
