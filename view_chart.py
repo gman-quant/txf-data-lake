@@ -75,7 +75,7 @@ def main():
     parser.add_argument('--symbol', type=str, default='TXF', help="商品代碼")
     parser.add_argument('--date', type=str, default=datetime.now().strftime('%Y-%m-%d'), help="開始日期")
     parser.add_argument('--end-date', type=str, default=None, help="結束日期")
-    parser.add_argument('--tf', type=str, default='5m', help="K棒週期")
+    parser.add_argument('--tf', type=str, default='1d', help="K棒週期")
     parser.add_argument('--combined', action='store_true', help="合併日夜盤")
     # 新增校正開關
     parser.add_argument('--adjust', action='store_true', help="顯示校正後的連續價格")

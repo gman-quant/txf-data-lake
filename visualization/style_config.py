@@ -92,6 +92,13 @@ class ColorScheme:
     LEGEND_SIZE  = 14
     CROSSHAIR    = {'color': '#CCCCCC', 'bg': '#4c525e', 'style': 1} # style: 1=Dash, 0=Solid
 
+    # 十字線磁吸模式
+    # 'normal' → 十字線自由移動，不磁吸（精確追蹤滑鼠位置）
+    # 'magnet' → 磁吸到 K 棒收盤價（Close）
+    # 'hidden' → 隱藏十字線
+    # 注意：LWC 原生僅支援磁吸 Close，若需 OHLC 需客製 JS
+    CROSSHAIR_MODE: str = 'normal'
+
     @classmethod
     def get_color(cls, is_up: bool, session: str) -> str:
         """取得 K 棒實體顏色 (區分日夜盤)"""
@@ -118,10 +125,14 @@ class ColorScheme:
                      font_size=cls.LEGEND_SIZE, color=cls.LEGEND_COLOR)
 
         # 十字查價線
-        line_style = {
-            "color": cls.CROSSHAIR['color'],
-            "width": 1,
-            "style": cls.CROSSHAIR['style'],
-            "labelBackgroundColor": cls.CROSSHAIR['bg']
-        }
-        chart.crosshair({"mode": 1, "vertLine": line_style, "horzLine": line_style})
+        chart.crosshair(
+            mode=cls.CROSSHAIR_MODE,
+            vert_color=cls.CROSSHAIR['color'],
+            vert_width=1,
+            vert_style='dashed',
+            vert_label_background_color=cls.CROSSHAIR['bg'],
+            horz_color=cls.CROSSHAIR['color'],
+            horz_width=1,
+            horz_style='dashed',
+            horz_label_background_color=cls.CROSSHAIR['bg'],
+        )

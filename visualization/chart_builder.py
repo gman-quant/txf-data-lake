@@ -58,13 +58,9 @@ class ChartBuilder:
                     line.set(line_data)
                     print(f"   - Added {label}")
 
-        # 根據需求：只有日線(1d)預設開啟，其他週期預設「隱藏」均線。
-        # 此舉讓使用者仍可以點擊圖例開啟顯示。
-        if self.timeframe != '1d':
-            for line in self.chart.lines():
-                # 遍歷目前建立的所有附加密碼線，並預設先隱藏。使用者後續可在右上角圖例手動點開。
-                # 注意：chart.lines() 包含所有創造出來的線(EMA, SMA)
-                line.hide_data()
+        # 預設隱藏所有均線，使用者可自行點圖例開啟顯示。
+        for line in self.chart.lines():
+            line.hide_data()
 
         # 5. 啟動
         self.chart.fit()
