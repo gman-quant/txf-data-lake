@@ -52,16 +52,33 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
         )
     else:
         # [分時線] 依據 ts 分組
+        # 將時間平移，使得開盤時間對齊 00:00 (Day: 08:45, Night: 15:00) 以利 dynamic group_by 切齊
+        q = q.with_columns(
+            pl.when(pl.col("session") == "Day")
+            .then(pl.col("ts").dt.offset_by("-8h45m"))
+            .otherwise(pl.col("ts").dt.offset_by("-15h"))
+            .alias("aligned_ts")
+        )
+
         q = (
-            q.sort("ts")
+            q.sort("aligned_ts")
             .group_by_dynamic(
-                "ts", 
+                "aligned_ts", 
                 every=timeframe, 
                 closed="left", 
-                label="left"
+                label="left",
+                group_by=["date", "session"]
             )
             .agg(aggs)
         )
+        
+        # 平移還原為原始時間
+        q = q.with_columns(
+            pl.when(pl.col("session") == "Day")
+            .then(pl.col("aligned_ts").dt.offset_by("8h45m"))
+            .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
+            .alias("ts")
+        ).drop("aligned_ts")
 
     # 5. 通用過濾
     q = q.filter(pl.col("volume") > 0)
@@ -105,30 +122,40 @@ def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         pl.col("high").max().alias("high"),
         pl.col("low").min().alias("low"),
         pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume"),
-        pl.col("session").first().alias("session")
+        pl.col("volume").sum().alias("volume")
     ]
     
-    # 動態聚合
+    if "underlying_close" in df.columns:
+        aggs.append(pl.col("underlying_close").last().alias("underlying_close"))
+
+    # 將時間平移，使得開盤時間對齊 00:00 (以利 dynamic group_by 對準整點起始)
+    q = q.with_columns(
+        pl.when(pl.col("session") == "Day")
+        .then(pl.col("ts").dt.offset_by("-8h45m"))
+        .otherwise(pl.col("ts").dt.offset_by("-15h"))
+        .alias("aligned_ts")
+    )
+
+    # 動態聚合 (並使用 date, session 分組，不需再重新計算 date)
     q = (
-        q.sort("ts")
+        q.sort("aligned_ts")
         .group_by_dynamic(
-            "ts", 
+            "aligned_ts", 
             every=timeframe, 
             closed="left", 
-            label="left"
+            label="left",
+            group_by=["date", "session"]
         )
         .agg(aggs)
     )
 
-    # 重新計算 Date (Session 已經在 agg 中取得第一根基底 K 棒的狀態)
-    q = q.with_columns([
-        pl.when(pl.col("ts").dt.time() < DAY_START)
-          .then(pl.col("ts").dt.offset_by("-1d"))
-          .otherwise(pl.col("ts"))
-          .dt.date()
-          .alias("date")
-    ])
+    # 時間平移還原
+    q = q.with_columns(
+        pl.when(pl.col("session") == "Day")
+        .then(pl.col("aligned_ts").dt.offset_by("8h45m"))
+        .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
+        .alias("ts")
+    ).drop("aligned_ts")
 
     # 補回 Symbol
     if symbol_val is not None:
