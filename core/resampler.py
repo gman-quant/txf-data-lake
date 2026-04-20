@@ -1,7 +1,77 @@
 # core/resampler.py
 import polars as pl
-from datetime import time
+from datetime import time, timedelta
 from config.calendar_rules import get_session_expression, DAY_START
+
+# Session 的 aligned 時間上限 (平移後):
+#   日盤: 08:45 ~ 13:45 → aligned 後為 00:00 ~ 05:00:00，上限 = 5 * 3600 秒
+#   夜盤: 15:00 ~ 05:00 → aligned 後為 00:00 ~ 14:00:00，上限 = 14 * 3600 秒
+_DAY_SESSION_LIMIT_SEC   = 5  * 3600   # 5 小時 (秒)
+_NIGHT_SESSION_LIMIT_SEC = 14 * 3600   # 14 小時 (秒)
+
+
+def _timeframe_to_seconds(timeframe: str) -> int:
+    """將 Polars duration 字串轉換為秒數，例如 '1h' -> 3600, '30m' -> 1800"""
+    if timeframe.endswith('h'):
+        return int(timeframe[:-1]) * 3600
+    elif timeframe.endswith('m'):
+        return int(timeframe[:-1]) * 60
+    elif timeframe.endswith('s'):
+        return int(timeframe[:-1])
+    return 3600  # fallback: 1h
+
+
+def _snap_aligned_ts_to_session(q: pl.LazyFrame, timeframe: str) -> pl.LazyFrame:
+    """
+    將 aligned_ts 中「稍微超過 session 收盤上限」的資料點，
+    強制拉回至最後一個合法 bucket 的起點，避免產生殘餘迷你 K-bar。
+
+    原理：
+        aligned_ts 平移後，日盤 session 對應 aligned [00:00, 05:00)，
+        夜盤對應 aligned [00:00, 14:00)。若某筆資料的 aligned_ts 時間部分
+        >= session 上限 (如 05:00:03)，代表它只是收盤那根 K-bar 多出幾秒的尾巴，
+        應強制被併入最後一個合法 bucket，而非開新的一根 K-bar。
+
+        做法：
+          1. 計算出最後一個合法 bucket 的秒偏移：last_bucket_sec = floor((session_limit_sec - 1) / tf_sec) * tf_sec
+          2. 若超界，把 aligned_ts 替換為「當日日期 + last_bucket_sec 的 duration」
+    """
+    tf_sec = _timeframe_to_seconds(timeframe)
+
+    # 計算最後合法 bucket 起點 (秒偏移)，使用 Python int 在 schema build 期計算，不依賴 Polars 大整數乘法
+    day_last_bucket_sec   = (((_DAY_SESSION_LIMIT_SEC   - 1) // tf_sec)) * tf_sec
+    night_last_bucket_sec = (((_NIGHT_SESSION_LIMIT_SEC - 1) // tf_sec)) * tf_sec
+
+    # 判斷 aligned_ts 是否超過 session 上限
+    # 注意：dt.hour() 回傳 Int8/Int16，乘以 3600 後最大 23*3600=82800，超過 Int16 上限，必須先 cast 到 Int32
+    aligned_sec = (
+        pl.col("aligned_ts").dt.hour().cast(pl.Int32) * 3600
+        + pl.col("aligned_ts").dt.minute().cast(pl.Int32) * 60
+        + pl.col("aligned_ts").dt.second().cast(pl.Int32)
+    )
+
+    # 取整天基準 (00:00:00 of that day in aligned space)
+    day_base_ts   = pl.col("aligned_ts").dt.truncate("1d")
+    night_base_ts = pl.col("aligned_ts").dt.truncate("1d")
+
+    snapped = (
+        pl.when(
+            (pl.col("session") == "Day") & (aligned_sec >= _DAY_SESSION_LIMIT_SEC)
+        )
+        .then(
+            day_base_ts + pl.duration(seconds=day_last_bucket_sec)
+        )
+        .when(
+            (pl.col("session") == "Night") & (aligned_sec >= _NIGHT_SESSION_LIMIT_SEC)
+        )
+        .then(
+            night_base_ts + pl.duration(seconds=night_last_bucket_sec)
+        )
+        .otherwise(pl.col("aligned_ts"))
+        .alias("aligned_ts")
+    )
+
+    return q.with_columns(snapped)
 
 def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     
@@ -59,6 +129,9 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
             .otherwise(pl.col("ts").dt.offset_by("-15h"))
             .alias("aligned_ts")
         )
+
+        # 🔒 收盤 Snap：將稍微超出 session 收盤時間的資料點歸入最後一個合法 bucket
+        q = _snap_aligned_ts_to_session(q, timeframe)
 
         q = (
             q.sort("aligned_ts")
@@ -135,6 +208,9 @@ def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
         .otherwise(pl.col("ts").dt.offset_by("-15h"))
         .alias("aligned_ts")
     )
+
+    # 🔒 收盤 Snap：將稍微超出 session 收盤時間的資料點歸入最後一個合法 bucket
+    q = _snap_aligned_ts_to_session(q, timeframe)
 
     # 動態聚合 (並使用 date, session 分組，不需再重新計算 date)
     q = (
