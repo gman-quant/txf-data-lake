@@ -59,13 +59,13 @@ def _snap_aligned_ts_to_session(q: pl.LazyFrame, timeframe: str) -> pl.LazyFrame
             (pl.col("session") == "Day") & (aligned_sec >= _DAY_SESSION_LIMIT_SEC)
         )
         .then(
-            day_base_ts + pl.duration(seconds=day_last_bucket_sec)
+            day_base_ts + pl.duration(seconds=day_last_bucket_sec + tf_sec) - pl.duration(microseconds=1)
         )
         .when(
             (pl.col("session") == "Night") & (aligned_sec >= _NIGHT_SESSION_LIMIT_SEC)
         )
         .then(
-            night_base_ts + pl.duration(seconds=night_last_bucket_sec)
+            night_base_ts + pl.duration(seconds=night_last_bucket_sec + tf_sec) - pl.duration(microseconds=1)
         )
         .otherwise(pl.col("aligned_ts"))
         .alias("aligned_ts")
@@ -85,7 +85,7 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     # 2. 建立 "Trading Date" (交易日)
     # 邏輯：如果是 00:00 ~ 05:00 之間的資料，日期要減 1 天 (歸到昨晚)
     # 這樣如 12/06 03:00 的夜盤，就會被標記為 12/05 的 Night
-    q = tick_df.lazy().with_columns([
+    q = tick_df.lazy().sort("ts").with_columns([
         get_session_expression("ts"),
         
         pl.when(pl.col("ts").dt.time() < DAY_START) # 只要是早上8點前
