@@ -201,37 +201,62 @@ def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
     if "underlying_close" in df.columns:
         aggs.append(pl.col("underlying_close").last().alias("underlying_close"))
 
-    # 將時間平移，使得開盤時間對齊 00:00 (以利 dynamic group_by 對準整點起始)
-    q = q.with_columns(
-        pl.when(pl.col("session") == "Day")
-        .then(pl.col("ts").dt.offset_by("-8h45m"))
-        .otherwise(pl.col("ts").dt.offset_by("-15h"))
-        .alias("aligned_ts")
-    )
+    # 判斷是否為跨日週期 (例如 1w, 1mo, 2d, 5d 等)
+    is_multi_day = timeframe.endswith('w') or timeframe.endswith('mo')
+    if timeframe.endswith('d'):
+        try:
+            # 判斷大於 1 天的週期
+            if int(timeframe[:-1]) > 1:
+                is_multi_day = True
+        except ValueError:
+            pass
 
-    # 🔒 收盤 Snap：將稍微超出 session 收盤時間的資料點歸入最後一個合法 bucket
-    q = _snap_aligned_ts_to_session(q, timeframe)
-
-    # 動態聚合 (並使用 date, session 分組，不需再重新計算 date)
-    q = (
-        q.sort("aligned_ts")
-        .group_by_dynamic(
-            "aligned_ts", 
-            every=timeframe, 
-            closed="left", 
-            label="left",
-            group_by=["date", "session"]
+    if is_multi_day:
+        # 跨日週期：直接依據時間進行大區間的分組，不需理會 session/date 邊界
+        # 我們將 ts 截斷至該週/月的起點作為分組依據
+        # Polars 的 group_by_dynamic 會自動處理這件事
+        q = (
+            q.sort("ts")
+            .group_by_dynamic(
+                "ts", 
+                every=timeframe, 
+                closed="left", 
+                label="left"
+            )
+            .agg(aggs)
         )
-        .agg(aggs)
-    )
+    else:
+        # 將時間平移，使得開盤時間對齊 00:00 (以利 dynamic group_by 對準整點起始)
+        q = q.with_columns(
+            pl.when(pl.col("session") == "Day")
+            .then(pl.col("ts").dt.offset_by("-8h45m"))
+            .otherwise(pl.col("ts").dt.offset_by("-15h"))
+            .alias("aligned_ts")
+        )
 
-    # 時間平移還原
-    q = q.with_columns(
-        pl.when(pl.col("session") == "Day")
-        .then(pl.col("aligned_ts").dt.offset_by("8h45m"))
-        .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
-        .alias("ts")
-    ).drop("aligned_ts")
+        # 🔒 收盤 Snap：將稍微超出 session 收盤時間的資料點歸入最後一個合法 bucket
+        q = _snap_aligned_ts_to_session(q, timeframe)
+
+        # 動態聚合 (並使用 date, session 分組，不需再重新計算 date)
+        q = (
+            q.sort("aligned_ts")
+            .group_by_dynamic(
+                "aligned_ts", 
+                every=timeframe, 
+                closed="left", 
+                label="left",
+                group_by=["date", "session"]
+            )
+            .agg(aggs)
+        )
+
+        # 時間平移還原
+        q = q.with_columns(
+            pl.when(pl.col("session") == "Day")
+            .then(pl.col("aligned_ts").dt.offset_by("8h45m"))
+            .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
+            .alias("ts")
+        ).drop("aligned_ts")
 
     # 補回 Symbol
     if symbol_val is not None:
