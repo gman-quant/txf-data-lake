@@ -35,7 +35,17 @@ class DataProcessor:
             .otherwise(pl.when(pl.col("session") == "Night").then(pl.lit(v_dn_n)).otherwise(pl.lit(v_dn_d)))
         )
 
-        ma_multiplier = 2 if (timeframe == '1d' and not combine_sessions) else 1
+        # 判斷是否為無夜盤的商品 (如 TSE 加權指數)
+        is_day_only = False
+        if "symbol" in df.columns and df["symbol"][0] == "TSE":
+            is_day_only = True
+
+        # 如果是日線且分開日夜盤，且該商品確實有夜盤，則 MA 週期需要乘以 2 (一天兩根 K 棒)
+        if timeframe == '1d' and not combine_sessions and not is_day_only:
+            ma_multiplier = 2
+        else:
+            ma_multiplier = 1
+            
         ma_days = list(ColorScheme.MA_SETTINGS.keys())
         
         ma_exprs = []

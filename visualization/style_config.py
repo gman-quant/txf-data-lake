@@ -27,15 +27,21 @@ class ColorScheme:
     # 1. 關鍵防守線加粗 (width: 2) -> 21(月線), 60(季線)
     # 2. 顏色層次: 極短線(白/黃) -> 短段(藍/粉) -> 中段(橘/綠) -> 長段(紅/紫)
     MA_SETTINGS = {
-        5:   {'type': 'EMA', 'color': '#FFFFFF', 'width': 1},  # 白 (極短線 - 貼價)
-        8:   {'type': 'EMA', 'color': '#FFFF00', 'width': 1},  # 黃 (短線動能 - 費波那契)
-        13:  {'type': 'EMA', 'color': '#00BFFF', 'width': 1},  # 深天藍 (短波段 - 費波那契)
-        21:  {'type': 'EMA', 'color': '#FF69B4', 'width': 2},  # 亮粉紅 (小月線/短期控盤 - 關鍵加粗)
-        30:  {'type': 'EMA', 'color': '#FFA500', 'width': 1},  # 亮橘色 (中段過渡)
-        40:  {'type': 'EMA', 'color': '#32CD32', 'width': 1},  # 萊姆綠 (中線過渡區)
-        50:  {'type': 'EMA', 'color': '#00FA9A', 'width': 1},  # 春天綠 (中區隔/延續)
-        60:  {'type': 'EMA', 'color': '#FF4500', 'width': 1},  # 橘紅 (季線/生命線 - 關鍵加粗)
-        59:  {'type': 'SMA', 'color': '#9370DB', 'width': 2},  # 中紫色 (防守底線)
+        # --- 短線 (實色，專注當下) ---
+        4:   {'type': 'SMA', 'color': '#FFFFFFFF', 'width': 1},  # 白色 (100% 不透明)
+        5:   {'type': 'EMA', 'color': '#FFFF00FF', 'width': 1},  # 黃色 (100% 不透明)
+        9:   {'type': 'SMA', 'color': '#00BFFFFF', 'width': 1},  # 深天藍 (100% 不透明)
+        10:  {'type': 'EMA', 'color': '#FF69B4FF', 'width': 2},  # 亮粉紅 (100% 不透明)
+
+        # --- 中線 (80% 透明度，過渡過濾) ---
+        19:  {'type': 'SMA', 'color': '#FFA500CC', 'width': 1},  # 亮橘色 (80% 不透明)
+        20:  {'type': 'EMA', 'color': '#32CD32CC', 'width': 2},  # 萊姆綠 (80% 不透明)
+
+        # --- 長線 (50% 透明度，背景參考，減少搶戲) ---
+        59:  {'type': 'SMA', 'color': '#FF450080', 'width': 1},  # 橘紅色 (50% 不透明)
+        60:  {'type': 'EMA', 'color': '#9370DB80', 'width': 2},  # 中紫色 (50% 不透明)
+        120: {'type': 'SMA', 'color': '#FFD70080', 'width': 2},  # 金金色 (50% 不透明)
+        240: {'type': 'SMA', 'color': '#4D96FF80', 'width': 2},  # 藍色 (50% 不透明)
     }
 
     COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
