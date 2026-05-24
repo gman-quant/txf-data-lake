@@ -66,9 +66,11 @@ class DataProcessor:
         if "session" not in df.columns or timeframe == '1w':
             df = df.with_columns(pl.lit("Day").alias("session"))
 
+        time_col_expr = pl.col("date" if timeframe == '1d' and combine_sessions else "ts")
+
         df = df.with_columns([
             pl.col("ts").dt.date().alias("date_temp"),
-            pl.col("date" if timeframe == '1d' and combine_sessions else "ts").dt.strftime(time_fmt).alias("time"),
+            time_col_expr.dt.strftime(time_fmt).alias("time"),
             pl.col("session").fill_null(get_session_expression("ts")),
             (pl.col("close") >= pl.col("open")).alias("is_up")
         ])
@@ -115,16 +117,37 @@ class DataProcessor:
 
     @staticmethod
     def _aggregate_sessions(df: pl.DataFrame) -> pl.DataFrame:
-        return (
-            df.with_columns(
-                pl.when(pl.col("session") == "Night")
-                .then(
-                    pl.when(pl.col("date").dt.weekday() == 5).then(pl.col("date").dt.offset_by("3d"))
-                    .otherwise(pl.col("date").dt.offset_by("1d"))
-                )
-                .otherwise(pl.col("date")).alias("trading_date")
+        if df.is_empty(): return df
+
+        # 用後向填充 (backward fill) 動態決定交易日
+        # 邏輯：夜盤交易日為其後第一個日盤的日期
+        df_with_trading_date = (
+            df.sort("ts")
+            .with_columns(
+                pl.when(pl.col("session") == "Day")
+                .then(pl.col("date"))
+                .otherwise(pl.lit(None))
+                .alias("trading_date")
             )
-            .lazy().sort("ts").group_by("trading_date")
+            .with_columns(
+                pl.col("trading_date").fill_null(strategy="backward")
+            )
+        )
+        
+        # 若最後一筆是夜盤且沒有後續日盤，則使用常規平移作為 fallback
+        fallback_expr = (
+            pl.when(pl.col("date").dt.weekday() == 5)
+            .then(pl.col("date").dt.offset_by("3d"))
+            .otherwise(pl.col("date").dt.offset_by("1d"))
+        )
+        df_with_trading_date = df_with_trading_date.with_columns(
+            pl.col("trading_date").fill_null(fallback_expr)
+        )
+
+        return (
+            df_with_trading_date
+            .lazy()
+            .group_by("trading_date")
             .agg([
                 pl.col("ts").first(), pl.col("open").first(), pl.col("high").max(),
                 pl.col("low").min(), pl.col("close").last(), pl.col("volume").sum()

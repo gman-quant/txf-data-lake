@@ -7,11 +7,16 @@ class ChartBuilder:
     """
     負責繪圖與圖層管理
     """
-    def __init__(self, symbol: str, timeframe: str, title_suffix: str = ""):
+    def __init__(self, symbol: str, timeframe: str, title_suffix: str = "", combine_sessions: bool = False):
         self.timeframe = timeframe
         self.chart = Chart(toolbox=True)
         ColorScheme.apply_theme(self.chart)
         self.chart.topbar.textbox('symbol', f'{symbol} {timeframe} {title_suffix}')
+        
+        # 如果是合併後的日線/週線等長週期，強制關閉時間顯示以保持乾淨的純日期顯示
+        is_daily_or_longer = timeframe in ('1d', '1w', '1mo') or timeframe.endswith('d') or timeframe.endswith('w')
+        if is_daily_or_longer and (timeframe != '1d' or combine_sessions):
+            self.chart.time_scale(time_visible=False)
 
     def plot(self, df: pl.DataFrame):
         if df.is_empty():

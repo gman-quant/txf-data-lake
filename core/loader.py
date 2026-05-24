@@ -10,7 +10,7 @@ class DataLoader:
     負責從 Data Lake (Parquet) 讀取原始 K 棒資料
     """
     @staticmethod
-    def load_kbars(symbol: str, timeframe: str, start_date: str, end_date: str) -> pl.DataFrame:
+    def load_kbars(symbol: str, timeframe: str, start_date: str, end_date: str, combine_sessions: bool = False) -> pl.DataFrame:
         from config.settings import TIMEFRAMES
         from core.resampler import resample_kbars
         
@@ -58,7 +58,32 @@ class DataLoader:
         if base_tf == '1d':
             s_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
             e_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
-            df = df.filter((pl.col("date") >= s_dt) & (pl.col("date") <= e_dt))
+            
+            if combine_sessions:
+                # 使用後向填充 (backward fill) 動態決定交易日進行篩選，確保前一日夜盤不會被提前過濾掉
+                trading_date_expr = (
+                    pl.when(pl.col("session") == "Day")
+                    .then(pl.col("date"))
+                    .otherwise(pl.lit(None))
+                    .alias("trading_date")
+                )
+                
+                # 計算 fallback 作為保險 (例如最後一筆是夜盤無後續日盤時)
+                fallback_expr = (
+                    pl.when(pl.col("date").dt.weekday() == 5)
+                    .then(pl.col("date").dt.offset_by("3d"))
+                    .otherwise(pl.col("date").dt.offset_by("1d"))
+                )
+                
+                df_with_trading = (
+                    df.sort("ts")
+                    .with_columns(trading_date_expr)
+                    .with_columns(pl.col("trading_date").fill_null(strategy="backward"))
+                    .with_columns(pl.col("trading_date").fill_null(fallback_expr))
+                )
+                df = df_with_trading.filter((pl.col("trading_date") >= s_dt) & (pl.col("trading_date") <= e_dt)).drop("trading_date")
+            else:
+                df = df.filter((pl.col("date") >= s_dt) & (pl.col("date") <= e_dt))
             
         # 3. 動態重取樣 (如果 requested timeframe 不等於 base_tf)
         if timeframe != base_tf:

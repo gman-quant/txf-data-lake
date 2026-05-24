@@ -19,7 +19,7 @@
   * **互動看盤**：
       * `view_chart.py` 預設顯示 `1d` 日線。
       * 均線預設隱藏，使用者可點圖例手動開啟。
-      * 支援 `--combined` 日夜盤合併與 `--adjust` 校正價格。
+      * 支援 `--combine` / `--combined` 日夜盤合併與 `--adjust` 校正價格。
 
 -----
 
@@ -126,13 +126,14 @@ python view_chart.py --date 2025-01-01 --end-date 2026-12-31 --tf 1h
 #### 🟢 日線圖 (合併日夜盤)
 
 ```bash
-# 不加 --combined 時，保留原始日夜盤分離顯示
+# 不加 --combine 時，保留原始日夜盤分離顯示
 python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d
 ```
 
 ```bash
-# 加上 --combined，會將日盤與夜盤合併成單一 1d K 棒
-python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combined
+# 加上 --combine (或 --combined)，會自動將前一日夜盤 (15:00) 與當日日盤 (13:45) 合併為單一全天盤 1d K 棒
+# 合併後的 K 棒在圖表與 Tooltip 上會精確顯示實際開盤時間（即前一日 15:00:00），無任何時間斷裂！
+python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combine
 ```
 
 #### 🟢 校正價格顯示
