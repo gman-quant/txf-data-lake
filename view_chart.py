@@ -79,6 +79,8 @@ def main():
     parser.add_argument('--combined', '--combine', dest='combined', action='store_true', help="合併日夜盤")
     # 新增校正開關
     parser.add_argument('--adjust', action='store_true', help="顯示校正後的連續價格")
+    # 新增 TSE 對照開關 (預設為顯示)
+    parser.add_argument('--no-tse', action='store_true', help="在繪製 TXF 時不載入與顯示 TSE (TAIEX) 對照線")
     args = parser.parse_args()
 
     if args.end_date is None: args.end_date = args.date
@@ -93,6 +95,11 @@ def main():
         print("[Error] Data not found.")
         return
 
+    df_tse = None
+    if args.symbol == 'TXF' and not args.no_tse:
+        print("[Extract] Loading corresponding TSE (TAIEX) data...")
+        df_tse = DataLoader.load_kbars('TSE', args.tf, args.date, args.end_date, combine_sessions=args.combined)
+
     # [A]djust: 價格校正 (在處理指標前執行)
     if args.adjust:
         print("[Adjust] Applying price adjustments...")
@@ -103,6 +110,26 @@ def main():
     # [T]ransform: 資料運算 (顏色、指標)
     print("[Proc] Processing...")
     df_processed = DataProcessor.process_data(df_raw, args.tf, args.combined)
+
+    if df_tse is not None and not df_tse.is_empty():
+        print("[Proc] Merging TSE (TAIEX) index...")
+        df_tse_processed = DataProcessor.process_data(df_tse, args.tf, args.combined)
+        if args.tf == '1d':
+            tse_join = df_tse_processed.select([
+                pl.col("date"),
+                pl.col("close").alias("TAIEX")
+            ])
+            df_processed = df_processed.join(tse_join, on="date", how="left")
+        else:
+            tse_join = df_tse_processed.select([
+                pl.col("time"),
+                pl.col("close").alias("TAIEX")
+            ])
+            df_processed = df_processed.join(tse_join, on="time", how="left")
+            
+        df_processed = df_processed.with_columns(
+            pl.col("TAIEX").fill_null(strategy="forward").fill_null(strategy="backward")
+        )
 
     # [L]oad/Visualize: 繪圖
     title_suffix = f"({args.date}~{args.end_date})"

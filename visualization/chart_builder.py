@@ -40,8 +40,16 @@ class ChartBuilder:
         vol.scale(scale_margin_top=0.8)
         vol.set(df_volume)
         
-        # 4. 全家桶指標繪製
-        # 4. 全家桶指標繪製
+        # 4. TAIEX 指數對照線繪製 (限 TXF K棒時)
+        # 建立在最前面以確保在 Legend (圖例) 中顯示在最上方
+        if 'TAIEX' in df.columns:
+            taiex_data = df.select(['time', 'TAIEX']).drop_nulls().to_pandas()
+            if not taiex_data.empty:
+                taiex_line = self.chart.create_line(name='TAIEX', color='#00E5FF', width=2)
+                taiex_line.set(taiex_data)
+                print("   - Added TAIEX Line (TSE Index)")
+
+        # 5. 全家桶指標繪製
         indicators = []
         
         for period, cfg in ColorScheme.MA_SETTINGS.items():
@@ -63,10 +71,11 @@ class ChartBuilder:
                     line.set(line_data)
                     print(f"   - Added {label}")
 
-        # 預設隱藏所有均線，使用者可自行點圖例開啟顯示。
+        # 預設隱藏所有均線 (TAIEX 線維持預設顯示)，使用者可自行點圖例開啟顯示。
         for line in self.chart.lines():
-            line.hide_data()
+            if line.name != 'TAIEX':
+                line.hide_data()
 
-        # 5. 啟動
+        # 6. 啟動
         self.chart.fit()
         self.chart.show(block=True)
