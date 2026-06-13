@@ -103,52 +103,57 @@ python batch_run.py
 
 ### 3\. 專業看盤 (View Chart)
 
-這是本專案最強大的視覺化工具。
+這是本專案最強大的視覺化工具，現在已升級為 **TradingView 風格的動態互動圖表**。
 
-#### 🟢 基本單日看盤
+#### 🟢 智慧無腦看盤 (最新自動載入)
+
+現在您再也不需要辛苦輸入開始與結束日期了！系統搭載了**智慧防爆回推機制與記憶體快取**：
 
 ```bash
-# 預設：看今天的 TXF 1日K
+# 直接執行，系統會自動抓取涵蓋到「今天」的最新資料
 python view_chart.py
-
-# 指定日期與週期 (例如 12/05 的 1分K)
-python view_chart.py --date 2025-12-05 --tf 1m
 ```
+執行後：
+- 畫面左上角會出現 **Timeframe 切換器**（預設提供 `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`）。
+- 點選任何短線週期（例如 `5m`），系統會從最新的日期自動往回推算，精確載入並裁切出最近的 20,000 根 K 棒，瞬間顯示，**保證不會記憶體爆滿**！
+- 所有切換過的週期都會自動寫入**記憶體快取**，再次點選時 0 毫秒瞬間切換。
 
-#### 🟢 查看一段時間 (自動拼接)
+#### 🟢 自訂切換器與特定歷史回測
 
-想看連續趨勢，例如 11月整個月的走勢：
+如果您想看特定的歷史區間，或者自訂工具列上的按鈕：
 
 ```bash
-python view_chart.py --date 2025-01-01 --end-date 2026-12-31 --tf 1h
+# 1. 查詢特定歷史月份，並手動覆寫 20,000 根的防爆上限，一次完整看 50,000 根的 5分 K
+python view_chart.py --date 2022-06-01 --end-date 2022-08-31 --tf 5m --max-bars 50000
+
+# 2. 自訂切換器選單（只顯示特定的週期按鈕）
+python view_chart.py --tfs 1m 3m 10m 1d
 ```
 
 #### 🟢 日線圖 (合併日夜盤)
 
 ```bash
 # 不加 --combine 時，保留原始日夜盤分離顯示
-python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d
+python view_chart.py --tf 1d
 ```
 
 ```bash
 # 加上 --combine (或 --combined)，會自動將前一日夜盤 (15:00) 與當日日盤 (13:45) 合併為單一全天盤 1d K 棒
 # 合併後的 K 棒在圖表與 Tooltip 上會精確顯示實際開盤時間（即前一日 15:00:00），無任何時間斷裂！
-python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --combine
+python view_chart.py --tf 1d --combine
 ```
 
-#### 🟢 校正價格顯示
+#### 🟢 價格校正與對照線
 
 ```bash
-python view_chart.py --date 2025-01-01 --end-date 2025-12-31 --tf 1d --adjust
+# 校正價格顯示 (消除結算日跳空)
+python view_chart.py --tf 1d --adjust
+
+# 查看 TSE (加權指數)
+python view_chart.py --symbol TSE --tf 1d
 ```
 
-#### 🟢 查看 TSE
-
-```bash
-python view_chart.py --symbol TSE --date 2025-01-01 --end-date 2025-12-31 --tf 1d
-```
-
-> `view_chart.py` 現在預設會隱藏均線，若要查看可以在圖例中點選對應線條。
+> `view_chart.py` 預設會隱藏所有均線（除了 TAIEX 對照線外），若要查看特定的 MA 線，可以在圖表右上角圖例中直接點選開啟。
 
 -----
 
