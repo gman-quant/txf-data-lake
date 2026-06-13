@@ -51,17 +51,23 @@ class ChartBuilder:
 
     def _on_timeframe_change(self, chart):
         new_tf = chart.topbar['timeframe'].value
-        print(f"\n[Chart] Switcher triggered. Switching timeframe to: {new_tf}")
-        if self.on_timeframe_change_cb:
-            df_processed = self.on_timeframe_change_cb(new_tf)
-            if df_processed is not None and not df_processed.is_empty():
-                self.timeframe = new_tf
-                self.chart.topbar['symbol'].set(f'{self.symbol} {new_tf} {self.title_suffix}')
-                self.apply_time_visibility(new_tf)
-                self.plot(df_processed)
-                print(f"[Chart] Timeframe {new_tf} loaded successfully.")
-            else:
-                print(f"[Warning] Failed to load data for timeframe: {new_tf}")
+        self._is_switching = True
+        try:
+            print(f"\n[Chart] Switcher triggered. Switching timeframe to: {new_tf}")
+            if self.on_timeframe_change_cb:
+                df_processed = self.on_timeframe_change_cb(new_tf)
+                if df_processed is not None and not df_processed.is_empty():
+                    self.timeframe = new_tf
+                    self.chart.topbar['symbol'].set(f'{self.symbol} {new_tf} {self.title_suffix}')
+                    self.apply_time_visibility(new_tf)
+                    self.plot(df_processed)
+                    print(f"[Chart] Timeframe {new_tf} loaded successfully.")
+                else:
+                    print(f"[Warning] Failed to load data for timeframe: {new_tf}")
+        except Exception as e:
+            print(f"[Chart] Error switching timeframe: {e}")
+        finally:
+            self._is_switching = False
 
     def plot(self, df: pl.DataFrame):
         if df.is_empty():
@@ -116,9 +122,57 @@ class ChartBuilder:
                 if label in self.ma_lines:
                     self.ma_lines[label].set(pd.DataFrame(columns=['time', label]))
 
-        # 6. 啟動/調整視野
+        # 6. 適配/調整視角
         self.chart.fit()
         
         if not self._chart_shown:
             self._chart_shown = True
             self.chart.show(block=True)
+
+    def update_live_bar(self, live_bar: dict):
+        if not self._chart_shown:
+            return
+            
+        import json
+        import pandas as pd
+        from datetime import datetime
+        
+        time_val = live_bar.get('time')
+        # 嚴格對齊 set() 時的底層行為：強制套用 UTC 時區以吻合 Pandas astype('int64') 的預設行為
+        if isinstance(time_val, str):
+            time_val = pd.to_datetime(time_val).to_pydatetime()
+        
+        if isinstance(time_val, pd.Timestamp):
+            time_val = time_val.to_pydatetime()
+            
+        if isinstance(time_val, datetime):
+            if time_val.tzinfo is None:
+                from datetime import timezone
+                time_val = time_val.replace(tzinfo=timezone.utc)
+            time_val = int(time_val.timestamp())
+            
+        # 1. 繞過 Buggy 套件，直接對 JS 引擎下達 Candle 更新指令
+        candle_data = {k: v for k, v in live_bar.items() if k in ['open', 'high', 'low', 'close', 'color', 'borderColor', 'wickColor']}
+        if time_val is not None:
+            candle_data['time'] = time_val
+        self.chart.run_script(f'{self.chart.id}.series.update({json.dumps(candle_data)})')
+        
+        # 2. 直接更新 Volume (注意 JS 內部單一數值指標的欄位名為 value)
+        if self.vol_series and 'volume' in live_bar:
+            vol_data = {
+                'time': time_val, 
+                'value': live_bar['volume'], 
+                'color': live_bar.get('vol_color', live_bar.get('color'))
+            }
+            self.chart.run_script(f'{self.vol_series.id}.series.update({json.dumps(vol_data)})')
+            
+        # 3. 直接更新 TAIEX
+        if self.taiex_line and 'TAIEX' in live_bar and live_bar['TAIEX'] is not None:
+            taiex_data = {'time': time_val, 'value': live_bar['TAIEX']}
+            self.chart.run_script(f'{self.taiex_line.id}.series.update({json.dumps(taiex_data)})')
+            
+        # 4. 直接更新 MAs
+        for label, line in self.ma_lines.items():
+            if label in live_bar and live_bar[label] is not None:
+                ma_data = {'time': time_val, 'value': live_bar[label]}
+                self.chart.run_script(f'{line.id}.series.update({json.dumps(ma_data)})')

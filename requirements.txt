@@ -3,3 +3,5 @@ lightweight-charts
 polars[rtcompat]
 pyarrow
 shioaji[speed]
+confluent-kafka
+protobuf
