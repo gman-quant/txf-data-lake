@@ -155,8 +155,12 @@ class ChartBuilder:
         candle_data = {k: v for k, v in live_bar.items() if k in ['open', 'high', 'low', 'close', 'color', 'borderColor', 'wickColor']}
         if time_val is not None:
             candle_data['time'] = time_val
-        self.chart.run_script(f'{self.chart.id}.series.update({json.dumps(candle_data)})')
-        
+            
+        try:
+            self.chart.run_script(f'{self.chart.id}.series.update({json.dumps(candle_data)})')
+        except Exception as e:
+            print(f"[Chart Error] JS Exception on series.update: {e}. Data: {candle_data}")
+            
         # 2. 直接更新 Volume (注意 JS 內部單一數值指標的欄位名為 value)
         if self.vol_series and 'volume' in live_bar:
             vol_data = {
@@ -164,15 +168,24 @@ class ChartBuilder:
                 'value': live_bar['volume'], 
                 'color': live_bar.get('vol_color', live_bar.get('color'))
             }
-            self.chart.run_script(f'{self.vol_series.id}.series.update({json.dumps(vol_data)})')
+            try:
+                self.chart.run_script(f'{self.vol_series.id}.series.update({json.dumps(vol_data)})')
+            except Exception as e:
+                pass
             
         # 3. 直接更新 TAIEX
         if self.taiex_line and 'TAIEX' in live_bar and live_bar['TAIEX'] is not None:
             taiex_data = {'time': time_val, 'value': live_bar['TAIEX']}
-            self.chart.run_script(f'{self.taiex_line.id}.series.update({json.dumps(taiex_data)})')
-            
+            try:
+                self.chart.run_script(f'{self.chart.id}.legend._lines.find((l) => l.series === {self.taiex_line.id}.series).series.update({json.dumps(taiex_data)})')
+            except Exception as e:
+                pass
+                
         # 4. 直接更新 MAs
-        for label, line in self.ma_lines.items():
-            if label in live_bar and live_bar[label] is not None:
-                ma_data = {'time': time_val, 'value': live_bar[label]}
-                self.chart.run_script(f'{line.id}.series.update({json.dumps(ma_data)})')
+        for name, line_obj in self.ma_lines.items():
+            if name in live_bar and live_bar[name] is not None:
+                line_data = {'time': time_val, 'value': live_bar[name]}
+                try:
+                    self.chart.run_script(f'{self.chart.id}.legend._lines.find((l) => l.series === {line_obj.id}.series).series.update({json.dumps(line_data)})')
+                except Exception as e:
+                    pass

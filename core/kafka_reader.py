@@ -98,9 +98,9 @@ class KafkaTickReader:
                     if t.timestamp_ms >= since_ts_ms:
                         ticks.append({
                             "ts": t.timestamp_ms,
-                            "close": t.close,
+                            "close": t.close / 10000.0,
                             "volume": t.volume,
-                            "underlying_price": getattr(t, "underlying_price", t.close)
+                            "underlying_price": getattr(t, "underlying_price", t.close) / 10000.0
                         })
                     fetched += 1
                     
@@ -140,9 +140,9 @@ class KafkaTickReader:
             t.ParseFromString(msg.value())
             new_ticks.append({
                 "ts": t.timestamp_ms,
-                "close": t.close,
+                "close": t.close / 10000.0,
                 "volume": t.volume,
-                "underlying_price": getattr(t, "underlying_price", t.close)
+                "underlying_price": getattr(t, "underlying_price", t.close) / 10000.0
             })
             
         return new_ticks
