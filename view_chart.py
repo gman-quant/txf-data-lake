@@ -190,13 +190,13 @@ def load_historical_raw(symbol, timeframe, date, end_date, combined, max_bars=20
     return df_raw
 
 # --- [Core Logic] 背景即時更新執行緒 ---
-def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False):
+def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False, is_simulating_history: bool = False):
     import time
     
     while not getattr(viewer, '_chart_shown', False):
         time.sleep(0.1)
         
-    print(f"[Kafka Live] Thread started. Background polling activated. Simulate Flow: {simulate_flow}")
+    print(f"[Kafka Live] Thread started. Background polling activated. Simulate Flow: {simulate_flow}, Instant History: {is_simulating_history and not simulate_flow}")
     last_update_time = 0
     
     def on_tick_cb(tick_data):
@@ -243,26 +243,20 @@ def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool
                             live_bar[label] = float(val) if val is not None else None
                             
                     # 依照您的要求，1d 不再需要跟著 Tick 瘋狂跳動即時更新
-                    if viewer.timeframe != '1d':
+                    if not viewer.timeframe.startswith('1d'):
                         viewer.update_live_bar(live_bar)
             except Exception as e:
                 print(f"[LiveDelta] Warning during background UI update: {e}")
                 
     sim_queue = getattr(delta_manager, 'simulation_queue', [])
     sim_idx = 0
-    sim_start_real_time = time.time()
-    sim_start_tick_time = sim_queue[0]['ts'] if sim_queue else 0
                 
     try:
         while getattr(viewer, '_chart_shown', False):
             if simulate_flow and sim_idx < len(sim_queue):
-                now = time.time()
-                elapsed_real = now - sim_start_real_time
-                # 1000倍速：現實世界 1 秒 = 模擬世界 1000 秒
-                current_sim_time = sim_start_tick_time + (elapsed_real * 1000 * 1000)
-                
                 batch = []
-                while sim_idx < len(sim_queue) and sim_queue[sim_idx]['ts'] <= current_sim_time:
+                # 全速重播：每次迴圈直接塞入 500 筆 Tick，不受現實時間限制
+                while sim_idx < len(sim_queue) and len(batch) < 500:
                     batch.append(sim_queue[sim_idx])
                     sim_idx += 1
                     
@@ -299,7 +293,7 @@ def main():
     parser.add_argument('--combined', '--combine', dest='combined', action='store_true', help="合併日夜盤")
     parser.add_argument('--adjust', action='store_true', help="顯示校正後的連續價格")
     parser.add_argument('--no-tse', action='store_true', help="不載入 TSE 對照線")
-    parser.add_argument('--tfs', type=str, nargs='+', default=['1m', '5m', '15m', '30m', '1h', '4h', '1d'], help="圖表週期選項")
+    parser.add_argument('--tfs', type=str, nargs='+', default=['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1d (comb)'], help="圖表週期選項")
     parser.add_argument('--max-bars', type=int, default=20000, help="最多載入的 K 棒數量")
     
     # Kafka Live 參數
@@ -307,6 +301,7 @@ def main():
     parser.add_argument('--kafka-broker', type=str, default='192.168.1.50:9092', help="Kafka Broker 地址")
     parser.add_argument('--kafka-topic', type=str, default='txf-tick', help="Kafka 訂閱主題")
     parser.add_argument('--simulate-cut-date', type=str, default=None, help="模擬 Parquet 只載入到此日期為止（例如 2026-06-11）")
+    parser.add_argument('--progressive', action='store_true', help="在歷史模擬模式下開啟漸進式重播 (預設為瞬間載入)")
     args = parser.parse_args()
 
     if args.end_date is None: args.end_date = datetime.now().strftime('%Y-%m-%d')
@@ -331,13 +326,26 @@ def main():
             kafka_reader_instance = KafkaTickReader(broker_url=args.kafka_broker, topic=args.kafka_topic, group_id=unique_group)
             delta_manager_instance = LiveDeltaManager(kafka_reader_instance)
             
-            # 使用 1m 的最新 Parquet 資料來定位時間，抓取 3 天作為緩衝，尋找最近一根 K 棒的真實毫秒數
-            recent_dt = (datetime.now() - timedelta(days=3)).strftime('%Y-%m-%d')
-            df_recent = load_historical_raw(args.symbol, '1m', recent_dt, args.end_date, False, max_bars=5000, simulate_cut_date=args.simulate_cut_date)
-            
-            base_ts_ms = int((datetime.now() - timedelta(days=1)).timestamp() * 1000)
-            if not df_recent.is_empty() and "ts" in df_recent.columns:
-                last_dt = df_recent["ts"][-1]
+            # --- 尋找最近一根 K 棒的真實時間 ---
+            # 如果是模擬模式，需要讀取歷史資料的最後一根。否則直接從實體路徑找最新檔案
+            last_dt = None
+            if args.simulate_cut_date:
+                # 模擬模式下：從模擬日往前推 15 天找最後一根 K 棒
+                sim_dt = datetime.strptime(args.simulate_cut_date, "%Y-%m-%d")
+                recent_dt = (sim_dt - timedelta(days=15)).strftime('%Y-%m-%d')
+                df_recent = load_historical_raw(args.symbol, '1m', recent_dt, args.end_date, False, max_bars=5000, simulate_cut_date=args.simulate_cut_date)
+                if not df_recent.is_empty() and "ts" in df_recent.columns:
+                    last_dt = df_recent["ts"][-1]
+            else:
+                # 真實 Live 模式下：直接掃描實體路徑找最新檔案 (Watermarking 免疫過年長假)
+                from core.loader import DataLoader
+                last_dt = DataLoader.get_latest_record_time(args.symbol, '1m')
+
+            # 預設 fallback
+            fallback_dt = datetime.strptime(args.simulate_cut_date, "%Y-%m-%d") if args.simulate_cut_date else datetime.now()
+            base_ts_ms = int((fallback_dt - timedelta(days=1)).timestamp() * 1000)
+
+            if last_dt is not None:
                 if isinstance(last_dt, str):
                     last_dt = datetime.fromisoformat(last_dt)
                 if isinstance(last_dt, datetime):
@@ -364,8 +372,9 @@ def main():
                         
                     base_ts_ms = int(next_session_start.timestamp() * 1000)
 
-            simulate_flow = bool(args.simulate_cut_date)
+            simulate_flow = bool(args.simulate_cut_date) and args.progressive
             delta_manager_instance.initialize(base_ts_ms, simulate_flow)
+                            
         except Exception as e:
             print(f"[Kafka Warning] Could not connect or initialize: {e}")
             args.live = False
@@ -374,17 +383,23 @@ def main():
     def get_data(tf: str, background_update=False):
         nonlocal actual_max_date
         
+        orig_tf = tf
+        is_combined = args.combined
+        if tf.endswith(" (comb)"):
+            is_combined = True
+            tf = tf.replace(" (comb)", "").strip()
+        
         # 1. 取得歷史資料 (Parquet)
-        if tf not in cache_raw:
+        if orig_tf not in cache_raw:
             if not background_update: 
-                print(f"[Process] Loading historical Parquet data for {tf}...")
+                print(f"[Process] Loading historical Parquet data for {orig_tf}...")
             df_hist = load_historical_raw(
                 args.symbol, tf, args.date, args.end_date, 
-                args.combined, max_bars=args.max_bars,
+                is_combined, max_bars=args.max_bars,
                 actual_max_date=actual_max_date,
                 simulate_cut_date=args.simulate_cut_date
             )
-            cache_raw[tf] = df_hist
+            cache_raw[orig_tf] = df_hist
             
             if actual_max_date is None and not df_hist.is_empty():
                 if "time" in df_hist.columns:
@@ -392,12 +407,12 @@ def main():
                 elif "date" in df_hist.columns:
                     actual_max_date = str(df_hist["date"][-1]).split(" ")[0]
 
-        df_hist = cache_raw[tf]
+        df_hist = cache_raw[orig_tf]
         
         # 2. 動態拼接 Live Delta (依照使用者要求，1d 完全禁止 Kafka 更新，只吃 Parquet)
         if delta_manager_instance is not None and tf != '1d':
             ticks_df = delta_manager_instance.get_ticks()
-            df_raw = perform_delta_merge(df_hist, ticks_df, tf, args.symbol, args.combined)
+            df_raw = perform_delta_merge(df_hist, ticks_df, tf, args.symbol, is_combined)
         else:
             df_raw = df_hist
 
@@ -410,15 +425,15 @@ def main():
             df_raw = apply_adjustment(df_raw, ADJ_PATH, tf)
             
         # 4. 指標與顏色處理
-        df_proc = DataProcessor.process_data(df_raw, tf, args.combined)
+        df_proc = DataProcessor.process_data(df_raw, tf, is_combined)
         
         # 5. TSE 對照線處理
         if not args.no_tse and args.symbol == 'TXF':
-            if tf not in cache_tse_raw:
-                tse_hist = load_historical_raw('TSE', tf, args.date, args.end_date, args.combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date)
-                cache_tse_raw[tf] = tse_hist
+            if orig_tf not in cache_tse_raw:
+                tse_hist = load_historical_raw('TSE', tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date)
+                cache_tse_raw[orig_tf] = tse_hist
             
-            tse_hist = cache_tse_raw[tf]
+            tse_hist = cache_tse_raw[orig_tf]
             
             if delta_manager_instance is not None:
                 ticks_df = delta_manager_instance.get_ticks()
@@ -428,13 +443,13 @@ def main():
                         pl.col("underlying_price").alias("close"), 
                         pl.col("volume")
                     ])
-                    tse_raw = perform_delta_merge(tse_hist, tse_ticks, tf, 'TSE', args.combined)
+                    tse_raw = perform_delta_merge(tse_hist, tse_ticks, tf, 'TSE', is_combined)
                 else:
                     tse_raw = tse_hist
             else:
                 tse_raw = tse_hist
                 
-            tse_proc = DataProcessor.process_data(tse_raw, tf, args.combined)
+            tse_proc = DataProcessor.process_data(tse_raw, tf, is_combined)
             
             if not tse_proc.is_empty():
                 if tf == '1d':
@@ -462,7 +477,7 @@ def main():
         # 徹底繞過 lightweight-charts-python 的 datetime64[us] 轉換 Bug：
         # 強制所有時間欄位轉型為 Datetime("ns")，讓 Pandas astype('int64') 計算出正確秒數
         if "time" in df_proc.columns:
-            if tf == '1d' and args.combined:
+            if tf == '1d' and is_combined:
                 df_proc = df_proc.with_columns(
                     pl.col("time").str.to_datetime(format="%Y-%m-%d").cast(pl.Datetime("ns"))
                 )
@@ -500,10 +515,11 @@ def main():
     
     # 啟動實時更新背景執行緒
     if args.live and kafka_reader_instance and delta_manager_instance:
-        simulate_flow = bool(args.simulate_cut_date)
+        is_simulating_history = bool(args.simulate_cut_date)
+        simulate_flow = is_simulating_history and args.progressive
         kafka_thread = threading.Thread(
             target=start_live_kafka_listener,
-            args=(delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow),
+            args=(delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow, is_simulating_history),
             daemon=True
         )
         kafka_thread.start()

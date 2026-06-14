@@ -10,6 +10,53 @@ class DataLoader:
     負責從 Data Lake (Parquet) 讀取原始 K 棒資料
     """
     @staticmethod
+    def get_latest_record_time(symbol: str, timeframe: str = '1m') -> datetime:
+        """
+        掃描 Data Lake 找出該商品最新的 Parquet 檔案，並回傳最後一根 K 棒的時間戳。
+        """
+        base_dir = os.path.join(DATA_ROOT, "kbars", timeframe, symbol)
+        if not os.path.exists(base_dir):
+            return None
+            
+        if timeframe == '1d':
+            # 1d 檔案結構：{symbol}_1d_{year}.parquet
+            files = [f for f in os.listdir(base_dir) if f.endswith(".parquet")]
+            if not files:
+                return None
+            latest_file = sorted(files)[-1]
+            path = os.path.join(base_dir, latest_file)
+        else:
+            # 1m 檔案結構：{year}/{date}_{symbol}_{timeframe}.parquet
+            years = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+            if not years:
+                return None
+            latest_year = sorted(years)[-1]
+            year_dir = os.path.join(base_dir, latest_year)
+            files = [f for f in os.listdir(year_dir) if f.endswith(".parquet")]
+            if not files:
+                return None
+            latest_file = sorted(files)[-1]
+            path = os.path.join(year_dir, latest_file)
+            
+        try:
+            df = pl.read_parquet(path)
+            if df.is_empty():
+                return None
+            if "ts" in df.columns:
+                last_dt = df["ts"][-1]
+                if isinstance(last_dt, str):
+                    last_dt = datetime.fromisoformat(last_dt)
+                return last_dt
+            elif "date" in df.columns:
+                last_dt = df["date"][-1]
+                if isinstance(last_dt, str):
+                    last_dt = datetime.strptime(last_dt, "%Y-%m-%d")
+                return last_dt
+        except Exception as e:
+            print(f"[DataLoader] Error reading latest file {path}: {e}")
+        return None
+
+    @staticmethod
     def load_kbars(symbol: str, timeframe: str, start_date: str, end_date: str, combine_sessions: bool = False) -> pl.DataFrame:
         from config.settings import TIMEFRAMES
         from core.resampler import resample_kbars

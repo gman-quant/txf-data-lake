@@ -25,7 +25,7 @@ class ChartBuilder:
         self.apply_time_visibility(timeframe)
         
         # 3. 設置 Timeframe 切換器
-        tfs = list(available_tfs) if available_tfs else ['1m', '5m', '15m', '30m', '1h', '4h', '1d']
+        tfs = list(available_tfs) if available_tfs else ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1d (comb)']
         if timeframe not in tfs:
             tfs.append(timeframe)
             
@@ -43,8 +43,10 @@ class ChartBuilder:
         self._chart_shown = False
 
     def apply_time_visibility(self, tf: str):
-        is_daily_or_longer = tf in ('1d', '1w', '1mo') or tf.endswith('d') or tf.endswith('w')
-        if is_daily_or_longer and (tf != '1d' or self.combine_sessions):
+        base_tf = tf.replace(' (comb)', '').strip()
+        is_daily_or_longer = base_tf in ('1d', '1w', '1mo') or base_tf.endswith('d') or base_tf.endswith('w')
+        is_combined = self.combine_sessions or '(comb)' in tf
+        if is_daily_or_longer and (base_tf != '1d' or is_combined):
             self.chart.time_scale(time_visible=False)
         else:
             self.chart.time_scale(time_visible=True)
