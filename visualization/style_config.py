@@ -45,6 +45,12 @@ class ColorScheme:
     }
 
     COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
+    
+    # 疊加副圖顏色配置 (動態折線)
+    COLOR_R2_SPOT_POS    = '#FF3333'  # 亮紅 (R2-Spot > 0)
+    COLOR_R2_SPOT_NEG    = '#33FF33'  # 亮綠 (R2-Spot < 0)
+    COLOR_CAL_SPREAD_POS = '#FFA500'  # 橙色 (R2-R1 > 0)
+    COLOR_CAL_SPREAD_NEG = '#1E90FF'  # 亮藍 (R2-R1 < 0)
 
     @staticmethod
     def _darken(hex_color: str, factor: float) -> str:

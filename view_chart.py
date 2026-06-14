@@ -318,6 +318,7 @@ def main():
     # 快取字典 (僅存最原始的 Historical Parquet DataFrame，不存合併後的結果)
     cache_raw = {}
     cache_tse_raw = {}
+    cache_r2_raw = {}
     actual_max_date = None
 
     # 初始化 LiveDeltaManager
@@ -425,6 +426,10 @@ def main():
         if df_raw.is_empty():
             return pl.DataFrame()
             
+        # [效能優化] 如果只是背景即時跳動的單根 K 棒更新，我們不需要算全部歷史的指標，裁切最後 500 根 (確保涵蓋 MA240) 即可
+        if background_update and len(df_raw) > 500:
+            df_raw = df_raw.tail(500)
+            
         # 3. 套用價格校正
         if args.adjust:
             ADJ_PATH = r"D:\txf-data\adjustments\txf_adjustment_table_final.csv"
@@ -433,54 +438,63 @@ def main():
         # 4. 指標與顏色處理
         df_proc = DataProcessor.process_data(df_raw, tf, is_combined)
         
-        # 5. TSE 對照線處理
-        if not args.no_tse and args.symbol == 'TXF':
-            if orig_tf not in cache_tse_raw:
-                tse_hist = load_historical_raw('TSE', tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date)
-                cache_tse_raw[orig_tf] = tse_hist
+        # --- 封裝外部商品載入與合併邏輯 ---
+        def _fetch_and_join_external(ext_symbol, cache_dict, target_col):
+            nonlocal df_proc
+            if orig_tf not in cache_dict:
+                cache_dict[orig_tf] = load_historical_raw(ext_symbol, tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date)
+            ext_hist = cache_dict[orig_tf]
             
-            tse_hist = cache_tse_raw[orig_tf]
-            
-            if delta_manager_instance is not None:
+            # 若為 TSE，我們可以從 Tick 中的 underlying_price 取得即時大盤指數
+            if delta_manager_instance is not None and ext_symbol == 'TSE':
                 ticks_df = delta_manager_instance.get_ticks()
                 if "underlying_price" in ticks_df.columns:
-                    tse_ticks = ticks_df.select([
-                        pl.col("ts"), 
-                        pl.col("underlying_price").alias("close"), 
-                        pl.col("volume")
-                    ])
-                    tse_raw = perform_delta_merge(tse_hist, tse_ticks, tf, 'TSE', is_combined)
+                    ext_ticks = ticks_df.select([pl.col("ts"), pl.col("underlying_price").alias("close"), pl.col("volume")])
+                    ext_raw = perform_delta_merge(ext_hist, ext_ticks, tf, ext_symbol, is_combined)
                 else:
-                    tse_raw = tse_hist
+                    ext_raw = ext_hist
             else:
-                tse_raw = tse_hist
+                ext_raw = ext_hist
                 
-            tse_proc = DataProcessor.process_data(tse_raw, tf, is_combined)
+            if background_update and len(ext_raw) > 500:
+                ext_raw = ext_raw.tail(500)
+                
+            ext_proc = DataProcessor.process_data(ext_raw, tf, is_combined)
             
-            if not tse_proc.is_empty():
-                if tf == '1d':
-                    if "date" in tse_proc.columns:
-                        tse_join = tse_proc.select([pl.col("date"), pl.col("close").alias("TAIEX")])
-                        df_proc = df_proc.join(tse_join, on="date", how="left")
-                else:
-                    if "time" in tse_proc.columns:
-                        tse_join = tse_proc.select([pl.col("time"), pl.col("close").alias("TAIEX")])
-                        df_proc = df_proc.join(tse_join, on="time", how="left")
-                        
+            if not ext_proc.is_empty():
+                join_col = "date" if tf == '1d' else "time"
+                if join_col in ext_proc.columns:
+                    ext_join = ext_proc.select([pl.col(join_col), pl.col("close").alias(target_col)]).unique(subset=[join_col], keep="last")
+                    df_proc = df_proc.join(ext_join, on=join_col, how="left")
+                    
+                if target_col in df_proc.columns:
+                    df_proc = df_proc.with_columns(pl.col(target_col).fill_null(strategy="forward").fill_null(strategy="backward"))
+
+        # 5. TSE 對照線處理
+        if not args.no_tse and args.symbol == 'TXF':
+            _fetch_and_join_external('TSE', cache_tse_raw, "TAIEX")
+            if "TAIEX" in df_proc.columns and "close" in df_proc.columns:
+                df_proc = df_proc.with_columns((pl.col("close") - pl.col("TAIEX")).alias("basis"))
+            
+        # 6. TXFR2 (次月) 處理
+        if args.symbol == 'TXF':
+            _fetch_and_join_external('TXFR2', cache_r2_raw, "TXFR2")
+            if "TXFR2" in df_proc.columns:
                 if "TAIEX" in df_proc.columns:
-                    df_proc = df_proc.with_columns(
-                        pl.col("TAIEX").fill_null(strategy="forward").fill_null(strategy="backward")
-                    )
-                    # 計算期現價差
-                    df_proc = df_proc.with_columns(
-                        (pl.col("close") - pl.col("TAIEX")).alias("basis")
-                    )
-            
+                    df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col("TAIEX")).alias("r2_basis"))
+                if "close" in df_proc.columns:
+                    df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col("close")).alias("calendar_spread"))
+                    
         # Ensure strict chronological order for lightweight-charts
         if "ts" in df_proc.columns:
-            df_proc = df_proc.sort("ts")
+            df_proc = df_proc.unique(subset=["ts"], keep="last").sort("ts")
+            df_proc = df_proc.with_columns(pl.col("ts").dt.strftime('%Y-%m-%d %H:%M:%S').alias("time"))
+        elif "date" in df_proc.columns:
+            df_proc = df_proc.unique(subset=["date"], keep="last").sort("date")
+            if "time" not in df_proc.columns:
+                df_proc = df_proc.with_columns(pl.col("date").alias("time"))
         elif "time" in df_proc.columns:
-            df_proc = df_proc.sort("time")
+            df_proc = df_proc.unique(subset=["time"], keep="last").sort("time")
             
         # 完美解決 lightweight-charts 的時間軸 Bug：
         # 將字串轉回時間物件，並強制指定為奈秒 ("ns")。

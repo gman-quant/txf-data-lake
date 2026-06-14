@@ -25,6 +25,9 @@ class ShioajiSource:
         elif symbol_code == 'TSE':
             # 抓加權指數
             return self.api.Contracts.Indexs.TSE.TSE001
+        elif symbol_code == 'TXFR2':
+            # 抓期貨次月
+            return self.api.Contracts.Futures.TXF.TXFR2
         else:
             raise ValueError(f"Unknown symbol: {symbol_code}")
 
@@ -50,7 +53,7 @@ class ShioajiSource:
             'close': ticks.close,
             'volume': ticks.volume
         }
-        if symbol_code == 'TXF':
+        if symbol_code in ('TXF', 'TXFR2'):
             data_dict.update({
                 'bid_price': ticks.bid_price,
                 'bid_volume': ticks.bid_volume,

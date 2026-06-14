@@ -61,8 +61,15 @@ class ChartBuilder:
         '''
         self.chart.run_script(js_patch)
 
-        self.basis_series = self.basis_subchart.create_histogram(name='期現價差 (Basis)', color='#FFA500')
+        self.basis_series = self.basis_subchart.create_histogram(name='期現價差 (Basis)', color=ColorScheme.C_UP)
         self.basis_series.horizontal_line(0, color='rgba(255, 255, 255, 0.4)', width=1, style='dashed')
+        
+        # 5.5 次月期現價差與跨月轉倉價差 (疊加)
+        self.r2_basis_series = self.basis_subchart.create_line(name='次月期現 (R2-Spot)', color=ColorScheme.COLOR_R2_SPOT_POS, width=2)
+        self.r2_basis_series.hide_data()  # 預設隱藏
+        
+        self.calendar_series = self.basis_subchart.create_line(name='跨月轉倉 (R2-R1)', color=ColorScheme.COLOR_CAL_SPREAD_POS, width=2)
+        self.calendar_series.hide_data()  # 預設隱藏
         
         # 強制設定為價格格式 (2位小數)，禁止轉換為 'K' (千) 這種成交量縮寫
         # [BugFix 2] 強制將 priceScaleId 改為 'right'，打破套件預設的隱藏刻度行為
@@ -170,6 +177,23 @@ class ChartBuilder:
         else:
             print("   - No basis column found in df!")
             self.basis_series.set(pd.DataFrame(columns=['time', '期現價差 (Basis)', 'color']))
+            
+        # 4.6. R2 相關價差疊加繪製
+        if 'r2_basis' in df.columns:
+            r2_color_expr = pl.when(pl.col("r2_basis") >= 0).then(pl.lit(ColorScheme.COLOR_R2_SPOT_POS)).otherwise(pl.lit(ColorScheme.COLOR_R2_SPOT_NEG))
+            r2_data = df.select(['time', pl.col('r2_basis').round(2).alias('次月期現 (R2-Spot)'), r2_color_expr.alias('color')]).drop_nulls().to_pandas()
+            if not r2_data.empty:
+                self.r2_basis_series.set(r2_data)
+        else:
+            self.r2_basis_series.set(pd.DataFrame(columns=['time', '次月期現 (R2-Spot)', 'color']))
+            
+        if 'calendar_spread' in df.columns:
+            cal_color_expr = pl.when(pl.col("calendar_spread") >= 0).then(pl.lit(ColorScheme.COLOR_CAL_SPREAD_POS)).otherwise(pl.lit(ColorScheme.COLOR_CAL_SPREAD_NEG))
+            cal_data = df.select(['time', pl.col('calendar_spread').round(2).alias('跨月轉倉 (R2-R1)'), cal_color_expr.alias('color')]).drop_nulls().to_pandas()
+            if not cal_data.empty:
+                self.calendar_series.set(cal_data)
+        else:
+            self.calendar_series.set(pd.DataFrame(columns=['time', '跨月轉倉 (R2-R1)', 'color']))
 
         # 5. 全家桶指標繪製
         indicators = []
@@ -201,11 +225,17 @@ class ChartBuilder:
             self._chart_shown = True
             self.chart.show(block=True)
 
+    def _safe_update_series(self, js_target: str, data: dict):
+        import json
+        try:
+            self.chart.run_script(f'{js_target}.update({json.dumps(data)})')
+        except Exception:
+            pass
+
     def update_live_bar(self, live_bar: dict):
         if not self._chart_shown:
             return
             
-        import json
         import pandas as pd
         from datetime import datetime
         
@@ -228,10 +258,7 @@ class ChartBuilder:
         if time_val is not None:
             candle_data['time'] = time_val
             
-        try:
-            self.chart.run_script(f'{self.chart.id}.series.update({json.dumps(candle_data)})')
-        except Exception as e:
-            print(f"[Chart Error] JS Exception on series.update: {e}. Data: {candle_data}")
+        self._safe_update_series(f'{self.chart.id}.series', candle_data)
             
         # 2. 直接更新 Volume (注意 JS 內部單一數值指標的欄位名為 value)
         if self.vol_series and 'volume' in live_bar:
@@ -240,27 +267,18 @@ class ChartBuilder:
                 'value': live_bar['volume'], 
                 'color': live_bar.get('vol_color', live_bar.get('color'))
             }
-            try:
-                self.chart.run_script(f'{self.vol_series.id}.series.update({json.dumps(vol_data)})')
-            except Exception as e:
-                pass
+            self._safe_update_series(f'{self.vol_series.id}.series', vol_data)
             
         # 3. 直接更新 TAIEX
         if self.taiex_line and 'TAIEX' in live_bar and live_bar['TAIEX'] is not None:
             taiex_data = {'time': time_val, 'value': live_bar['TAIEX']}
-            try:
-                self.chart.run_script(f'{self.chart.id}.legend._lines.find((l) => l.series === {self.taiex_line.id}.series).series.update({json.dumps(taiex_data)})')
-            except Exception as e:
-                pass
+            self._safe_update_series(f'{self.chart.id}.legend._lines.find((l) => l.series === {self.taiex_line.id}.series).series', taiex_data)
                 
         # 4. 直接更新 MAs
         for name, line_obj in self.ma_lines.items():
             if name in live_bar and live_bar[name] is not None:
                 line_data = {'time': time_val, 'value': live_bar[name]}
-                try:
-                    self.chart.run_script(f'{self.chart.id}.legend._lines.find((l) => l.series === {line_obj.id}.series).series.update({json.dumps(line_data)})')
-                except Exception as e:
-                    pass
+                self._safe_update_series(f'{self.chart.id}.legend._lines.find((l) => l.series === {line_obj.id}.series).series', line_data)
                     
         # 5. 直接更新 Basis Subchart
         if 'basis' in live_bar and live_bar['basis'] is not None:
@@ -275,9 +293,19 @@ class ChartBuilder:
                     basis_color = ColorScheme.C_DN_DIM if session == 'Night' else ColorScheme.C_DN
                     
             basis_data = {'time': time_val, 'value': basis_val, 'color': basis_color}
-            try:
-                # 由於附圖沒有 main legend，我們直接透過 subchart series 呼叫更新
-                # 若 .id 映射的是 JS 的 series id：
-                self.chart.run_script(f'{self.basis_series.id}.series.update({json.dumps(basis_data)})')
-            except Exception as e:
-                pass
+            self._safe_update_series(f'{self.basis_series.id}.series', basis_data)
+                
+        # 6. 直接更新 R2 相關價差疊加折線
+        if hasattr(self, 'r2_basis_series') and 'r2_basis' in live_bar and live_bar['r2_basis'] is not None:
+            r2_val = round(float(live_bar['r2_basis']), 2)
+            from visualization.style_config import ColorScheme
+            r2_color = ColorScheme.COLOR_R2_SPOT_POS if r2_val >= 0 else ColorScheme.COLOR_R2_SPOT_NEG
+            r2_data = {'time': time_val, 'value': r2_val, 'color': r2_color}
+            self._safe_update_series(f'{self.r2_basis_series.id}.series', r2_data)
+                
+        if hasattr(self, 'calendar_series') and 'calendar_spread' in live_bar and live_bar['calendar_spread'] is not None:
+            cal_val = round(float(live_bar['calendar_spread']), 2)
+            from visualization.style_config import ColorScheme
+            cal_color = ColorScheme.COLOR_CAL_SPREAD_POS if cal_val >= 0 else ColorScheme.COLOR_CAL_SPREAD_NEG
+            cal_data = {'time': time_val, 'value': cal_val, 'color': cal_color}
+            self._safe_update_series(f'{self.calendar_series.id}.series', cal_data)
