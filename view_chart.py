@@ -22,16 +22,14 @@ class LiveDeltaManager:
     統一管理從 Kafka 讀取到的 Live Delta，
     讓抓取歷史缺口與之後背景執行緒收到新 Ticks 寫入此記憶體池。
     """
-    def __init__(self, kafka_reader):
-        self.kafka_reader = kafka_reader
+    def __init__(self):
         self.live_ticks: pl.DataFrame = pl.DataFrame()
         self.lock = threading.Lock()
         self.simulation_queue = []
         
-    def initialize(self, base_ts_ms: int, simulate_flow: bool = False):
-        print(f"[LiveDelta] Fetching global gap ticks from timestamp {base_ts_ms}...")
-        self.live_ticks = self.kafka_reader.fetch_gap_ticks(base_ts_ms)
-        print(f"[LiveDelta] Fetched {len(self.live_ticks)} ticks for global memory cache.")
+    def initialize(self, gap_ticks: pl.DataFrame, simulate_flow: bool = False):
+        print(f"[LiveDelta] Initializing memory cache with {len(gap_ticks)} ticks.")
+        self.live_ticks = gap_ticks
         
         if simulate_flow and not self.live_ticks.is_empty():
             print("[LiveDelta] Simulation Mode: Stashing ticks into simulation queue for 1000x replay.")
@@ -190,7 +188,7 @@ def load_historical_raw(symbol, timeframe, date, end_date, combined, max_bars=20
     return df_raw
 
 # --- [Core Logic] 背景即時更新執行緒 ---
-def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False, is_simulating_history: bool = False, delta_manager_r2=None):
+def start_live_kafka_listener(kafka_reader, delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False, is_simulating_history: bool = False, delta_manager_r2=None, main_topic: str = "txf-tick", r2_topic: str = "txfr2-tick"):
     import time
     
     while not getattr(viewer, '_chart_shown', False):
@@ -199,11 +197,14 @@ def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool
     print(f"[Kafka Live] Thread started. Background polling activated. Simulate Flow: {simulate_flow}, Instant History: {is_simulating_history and not simulate_flow}")
     last_update_time = 0
     
-    def on_tick_cb(tick_data):
+    def on_tick_cb(tick_data, topic=None):
         nonlocal last_update_time
         # 背景只要單純把 ticks 加入全域記憶體即可
-        if tick_data is not None:
-            delta_manager.add_ticks([tick_data])
+        if tick_data is not None and topic is not None:
+            if topic == main_topic:
+                delta_manager.add_ticks([tick_data])
+            elif topic == r2_topic and delta_manager_r2 is not None:
+                delta_manager_r2.add_ticks([tick_data])
             
         if getattr(viewer, '_is_switching', False):
             return
@@ -269,29 +270,31 @@ def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool
                 if batch:
                     # 批次餵進去，只呼叫最後一次 on_tick_cb(None) 觸發 UI 更新
                     delta_manager.add_ticks(batch)
-                    on_tick_cb(None)
+                    on_tick_cb(None, None)
                 else:
-                    on_tick_cb(None)
+                    on_tick_cb(None, None)
             else:
-                ticks = delta_manager.kafka_reader.poll_new_ticks()
-                ticks_r2 = delta_manager_r2.kafka_reader.poll_new_ticks() if delta_manager_r2 else []
+                ticks_dict = kafka_reader.poll_new_ticks()
                 
-                if ticks or ticks_r2:
-                    if ticks_r2:
-                        delta_manager_r2.add_ticks(ticks_r2)
-                    if ticks:
-                        for t in ticks:
-                            on_tick_cb(t)
+                if ticks_dict:
+                    # 先把所有收到的資料放進記憶體
+                    if main_topic in ticks_dict:
+                        delta_manager.add_ticks(ticks_dict[main_topic])
+                    if r2_topic in ticks_dict and delta_manager_r2:
+                        delta_manager_r2.add_ticks(ticks_dict[r2_topic])
+                        
+                    # 觸發更新
+                    on_tick_cb(None, None)
                 else:
                     # 若無新資料，手動呼叫 on_tick_cb 觸發每 0.5s 的 UI 更新檢查
-                    on_tick_cb(None)
+                    on_tick_cb(None, None)
             
             time.sleep(0.05)
     except Exception as e:
         print(f"[Kafka Live] Thread exception: {e}")
     finally:
         print("[Kafka] Closing Reader...")
-        delta_manager.kafka_reader.close()
+        kafka_reader.close()
 
 # --- [Main Entry] ---
 def main():
@@ -303,6 +306,7 @@ def main():
     parser.add_argument('--tf', type=str, default='1d', help="K棒週期")
     parser.add_argument('--combined', '--combine', dest='combined', action='store_true', help="合併日夜盤")
     parser.add_argument('--adjust', action='store_true', help="顯示校正後的連續價格")
+    parser.add_argument('--smart-rollover', action='store_true', help="結算日自動切換為主圖顯示次月合約(R2)")
     parser.add_argument('--no-tse', action='store_true', help="不載入 TSE 對照線")
     parser.add_argument('--tfs', type=str, nargs='+', default=['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1d (comb)'], help="圖表週期選項")
     parser.add_argument('--max-bars', type=int, default=20000, help="最多載入的 K 棒數量")
@@ -337,8 +341,9 @@ def main():
         import uuid
         try:
             unique_group = f"txf_chart_live_{uuid.uuid4().hex[:8]}"
-            kafka_reader_instance = KafkaTickReader(broker_url=args.kafka_broker, topic=args.kafka_topic, group_id=unique_group)
-            delta_manager_instance = LiveDeltaManager(kafka_reader_instance)
+            kafka_reader_instance = KafkaTickReader(broker_url=args.kafka_broker, topics=[args.kafka_topic, "txfr2-tick"], group_id=unique_group)
+            delta_manager_instance = LiveDeltaManager()
+            delta_manager_instance_r2 = LiveDeltaManager()
             
             # --- 尋找最近一根 K 棒的真實時間 ---
             # 如果是模擬模式，需要讀取歷史資料的最後一根。否則直接從實體路徑找最新檔案
@@ -387,17 +392,15 @@ def main():
                     base_ts_ms = int(next_session_start.timestamp() * 1000)
 
             simulate_flow = bool(args.simulate_cut_date) and args.progressive
-            delta_manager_instance.initialize(base_ts_ms, simulate_flow)
             
-            # --- 建立 R2 專屬 Kafka Reader ---
-            try:
-                unique_group_r2 = f"txf_chart_live_r2_{uuid.uuid4().hex[:8]}"
-                # r2 專用 topic 名稱與 streaming server 的 config 一致
-                kafka_reader_instance_r2 = KafkaTickReader(broker_url=args.kafka_broker, topic="txfr2-tick", group_id=unique_group_r2)
-                delta_manager_instance_r2 = LiveDeltaManager(kafka_reader_instance_r2)
-                delta_manager_instance_r2.initialize(base_ts_ms, simulate_flow)
-            except Exception as e_r2:
-                print(f"[Kafka Warning] Could not connect or initialize R2 stream: {e_r2}")
+            # --- 初始化兩個 Manager (透過單一 Reader 抓取所有 Gap Ticks) ---
+            gap_history_dict = kafka_reader_instance.fetch_gap_ticks(base_ts_ms)
+            
+            main_topic = args.kafka_topic
+            r2_topic = "txfr2-tick"
+            
+            delta_manager_instance.initialize(gap_history_dict.get(main_topic, pl.DataFrame()), simulate_flow)
+            delta_manager_instance_r2.initialize(gap_history_dict.get(r2_topic, pl.DataFrame()), simulate_flow)
                             
         except Exception as e:
             print(f"[Kafka Warning] Could not connect or initialize: {e}")
@@ -414,31 +417,126 @@ def main():
             tf = tf.replace(" (comb)", "").strip()
         
         # 1. 取得歷史資料 (Parquet)
-        if orig_tf not in cache_raw:
+        # [優化] 使用 ThreadPoolExecutor 並行讀取三個商品歷史資料，大幅縮短啟動時間
+        import concurrent.futures
+        
+        needs_main = orig_tf not in cache_raw
+        needs_tse = orig_tf not in cache_tse_raw
+        needs_r2 = orig_tf not in cache_r2_raw
+        
+        if needs_main or needs_tse or needs_r2:
             if not background_update: 
-                print(f"[Process] Loading historical Parquet data for {orig_tf}...")
-            df_hist = load_historical_raw(
-                args.symbol, tf, args.date, args.end_date, 
-                is_combined, max_bars=args.max_bars,
-                actual_max_date=actual_max_date,
-                simulate_cut_date=args.simulate_cut_date
-            )
-            cache_raw[orig_tf] = df_hist
+                print(f"[Process] Parallel loading historical Parquet data for {orig_tf}...")
             
-            if actual_max_date is None and not df_hist.is_empty():
-                if "time" in df_hist.columns:
-                    actual_max_date = str(df_hist["time"][-1]).split(" ")[0]
-                elif "date" in df_hist.columns:
-                    actual_max_date = str(df_hist["date"][-1]).split(" ")[0]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                future_main = executor.submit(load_historical_raw, args.symbol, tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, actual_max_date=actual_max_date, simulate_cut_date=args.simulate_cut_date) if needs_main else None
+                future_tse = executor.submit(load_historical_raw, 'TSE', tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date) if needs_tse else None
+                future_r2 = executor.submit(load_historical_raw, 'TXFR2', tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date) if needs_r2 else None
+                
+                if future_main: cache_raw[orig_tf] = future_main.result()
+                if future_tse: cache_tse_raw[orig_tf] = future_tse.result()
+                if future_r2: cache_r2_raw[orig_tf] = future_r2.result()
+            
+            if needs_main and actual_max_date is None and not cache_raw[orig_tf].is_empty():
+                if "time" in cache_raw[orig_tf].columns:
+                    actual_max_date = str(cache_raw[orig_tf]["time"][-1]).split(" ")[0]
+                elif "date" in cache_raw[orig_tf].columns:
+                    actual_max_date = str(cache_raw[orig_tf]["date"][-1]).split(" ")[0]
 
         df_hist = cache_raw[orig_tf]
         
-        # 2. 動態拼接 Live Delta (依照使用者要求，1d 完全禁止 Kafka 更新，只吃 Parquet)
+        # 2. 動態拼接 Live Delta
         if delta_manager_instance is not None and tf != '1d':
             ticks_df = delta_manager_instance.get_ticks()
             df_raw = perform_delta_merge(df_hist, ticks_df, tf, args.symbol, is_combined)
         else:
             df_raw = df_hist
+            
+        # ---------------------------------------------------------
+        # [NEW] 智慧轉倉 (Smart Rollover) - 將結算日當天的 K 棒強制換成 TXFR2
+        # ---------------------------------------------------------
+        if getattr(args, 'smart_rollover', False) and args.symbol == 'TXF' and orig_tf in cache_r2_raw and not df_raw.is_empty():
+            import pandas as pd
+            from datetime import date, timedelta
+            
+            # 1. 統一使用 ts 平移 9 小時來完美對齊「期交所交易日 (Trading Date)」
+            # (15:00 + 9h = 24:00 隔日), (08:45 + 9h = 17:45 當日)
+            # 這樣可以完美解決夜盤屬於哪一個交易日的問題！
+            dates_s = df_raw.select(pl.col("ts").dt.offset_by("9h").dt.date().cast(str)).to_series().unique().to_list()
+            dates_s = [d for d in dates_s if d is not None]
+            
+            # 2. 演算法推算第三個禮拜三的精準結算日 (避開假日)
+            year_months = set([d[:7] for d in dates_s])
+            algorithmic_settlements = set()
+            for ym in year_months:
+                y, m = int(ym[:4]), int(ym[5:7])
+                first_day = date(y, m, 1)
+                first_wed_offset = (2 - first_day.weekday()) % 7
+                third_wed = first_day + timedelta(days=first_wed_offset + 14)
+                third_wed_str = third_wed.strftime("%Y-%m-%d")
+                
+                # 歷史資料中 >= 第三個禮拜三 的第一個交易日
+                valid_dates = [d for d in dates_s if d >= third_wed_str]
+                if valid_dates:
+                    algorithmic_settlements.add(sorted(valid_dates)[0])
+                    
+            # 3. 讀取 CSV 補足歷史特例 (提早/延後)
+            try:
+                from config.settings import SETTLEMENT_CSV_PATH
+                csv_dates = pd.read_csv(SETTLEMENT_CSV_PATH)['date'].tolist()
+                algorithmic_settlements.update(csv_dates)
+            except:
+                pass
+                
+            # 4. 針對「結算日」進行偷天換日 (Data Splicing)
+            # 將 TXF 的資料全部替換為 TXFR2
+            ext_raw = cache_r2_raw[orig_tf]
+            
+            # 先確保 ext_raw 也有最新的 Live Ticks (如果是看實時盤)
+            if delta_manager_instance_r2 is not None and tf != '1d':
+                ext_raw = perform_delta_merge(ext_raw, delta_manager_instance_r2.get_ticks(), tf, 'TXFR2', is_combined)
+                
+            if not ext_raw.is_empty():
+                if tf == '1d':
+                    join_cols = ["date"] if is_combined else ["date", "session"]
+                else:
+                    join_cols = ["ts"]
+                
+                # 保留 R1 原始 Close，供後續跨月轉倉計算使用
+                df_raw = df_raw.with_columns(pl.col("close").alias("r1_close_original"))
+                
+                # 取得 ext_raw 的 OHLCV
+                replace_cols = [c for c in ["open", "high", "low", "close", "volume"] if c in ext_raw.columns]
+                rename_map = {c: f"r2_{c}" for c in replace_cols}
+                ext_join = ext_raw.select(join_cols + replace_cols).rename(rename_map).unique(subset=join_cols, keep="last")
+                
+                # 進行 Join (使用 full join 確保 R2 在 13:30 ~ 13:45 的 K 棒不會被拋棄)
+                df_raw = df_raw.join(ext_join, on=join_cols, how="full", coalesce=True)
+                
+                # 若因為 full join 產生了新的一列，原本 df_raw 才有的欄位（如 symbol, underlying_close 等）會變成 null
+                # 但這不影響，因為我們只在結算日當天的 13:30~13:45 產生 null，而這段時間大盤確實已經收盤了
+                
+                # 找出結算日的 rows (再次使用 ts 平移 9 小時完美對齊交易日)
+                trading_date_expr = pl.col("ts").dt.offset_by("9h").dt.date().cast(str)
+                is_settlement = trading_date_expr.is_in(list(algorithmic_settlements))
+                
+                # 條件替換：如果是結算日且有 R2 資料，就替換為 R2 的資料，否則維持原樣
+                replace_exprs = []
+                for c in replace_cols:
+                    r2_c = f"r2_{c}"
+                    expr = pl.when(is_settlement & pl.col(r2_c).is_not_null()).then(pl.col(r2_c)).otherwise(pl.col(c)).alias(c)
+                    replace_exprs.append(expr)
+                    
+                df_raw = df_raw.with_columns(replace_exprs)
+                
+                # 清除因為 full join 帶入但在非結算日無效的 R2 獨有列 (這些列的 close 會是 null)
+                df_raw = df_raw.filter(pl.col("close").is_not_null())
+                
+                # [CRITICAL FIX] Polars 的 full join 會完全打亂資料的排序
+                # 必須在此刻重新排序，否則後續 TAIEX 的 fill_null(forward) 會將 2020 年的數據填到 2026 年！
+                df_raw = df_raw.sort("ts")
+                
+        # ---------------------------------------------------------
 
         if df_raw.is_empty():
             return pl.DataFrame()
@@ -482,10 +580,14 @@ def main():
             ext_proc = DataProcessor.process_data(ext_raw, tf, is_combined)
             
             if not ext_proc.is_empty():
-                join_col = "date" if tf == '1d' else "time"
-                if join_col in ext_proc.columns:
-                    ext_join = ext_proc.select([pl.col(join_col), pl.col("close").alias(target_col)]).unique(subset=[join_col], keep="last")
-                    df_proc = df_proc.join(ext_join, on=join_col, how="left")
+                if tf == '1d':
+                    join_cols = ["date"] if is_combined else ["date", "session"]
+                else:
+                    join_cols = ["time"]
+                    
+                if all(c in ext_proc.columns for c in join_cols):
+                    ext_join = ext_proc.select(join_cols + [pl.col("close").alias(target_col)]).unique(subset=join_cols, keep="last")
+                    df_proc = df_proc.join(ext_join, on=join_cols, how="left")
                     
                 if target_col in df_proc.columns:
                     df_proc = df_proc.with_columns(pl.col(target_col).fill_null(strategy="forward").fill_null(strategy="backward"))
@@ -502,8 +604,11 @@ def main():
             if "TXFR2" in df_proc.columns:
                 if "TAIEX" in df_proc.columns:
                     df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col("TAIEX")).alias("r2_basis"))
-                if "close" in df_proc.columns:
-                    df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col("close")).alias("calendar_spread"))
+                
+                # 若開啟 smart_rollover，原 close 已變成 R2，需使用 r1_close_original 計算跨月價差
+                target_r1_col = "r1_close_original" if "r1_close_original" in df_proc.columns else "close"
+                if target_r1_col in df_proc.columns:
+                    df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col(target_r1_col)).alias("calendar_spread"))
                     
         # Ensure strict chronological order for lightweight-charts
         if "ts" in df_proc.columns:
@@ -563,7 +668,7 @@ def main():
         simulate_flow = is_simulating_history and args.progressive
         kafka_thread = threading.Thread(
             target=start_live_kafka_listener,
-            args=(delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow, is_simulating_history, delta_manager_instance_r2),
+            args=(kafka_reader_instance, delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow, is_simulating_history, delta_manager_instance_r2, args.kafka_topic, "txfr2-tick"),
             daemon=True
         )
         kafka_thread.start()

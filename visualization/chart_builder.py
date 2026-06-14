@@ -48,17 +48,8 @@ class ChartBuilder:
         self.basis_subchart.legend(visible=True)
         
         # [BugFix 1] 繞過 lightweight-charts-python 內部在 sync=True 時的 Legend 同步崩潰 Bug，並關閉 K/M 縮寫
-        js_patch = f'''
-        if ({self.basis_subchart.id}.legend) {{
-            const orig = {self.basis_subchart.id}.legend.legendHandler.bind({self.basis_subchart.id}.legend);
-            {self.basis_subchart.id}.legend.legendHandler = function(p, s) {{
-                if (s && !p.seriesData) return;
-                orig(p, s);
-            }};
-            // 覆寫內建的縮寫邏輯 (K/M)，強制顯示完整原始數值
-            {self.basis_subchart.id}.legend.shorthandFormat = function(t) {{ return t.toString(); }};
-        }}
-        '''
+        from visualization.js_snippets import get_legend_shorthand_fix, get_crosshair_sync_fix
+        js_patch = get_legend_shorthand_fix(self.basis_subchart.id)
         self.chart.run_script(js_patch)
 
         self.basis_series = self.basis_subchart.create_histogram(name='期現價差 (Basis)', color=ColorScheme.C_UP)
@@ -72,23 +63,18 @@ class ChartBuilder:
         self.calendar_series.hide_data()  # 預設隱藏
         
         # 強制設定為價格格式 (2位小數)，禁止轉換為 'K' (千) 這種成交量縮寫
-        # [BugFix 2] 強制將 priceScaleId 改為 'right'，打破套件預設的隱藏刻度行為
+        # [BugFix 2] 攔截 setCrosshairPosition 避免 Value is null 崩潰 (包含主副圖的雙向修復)
+        js_patch_2 = get_crosshair_sync_fix(
+            main_chart_id=self.chart.id,
+            subchart_id=self.basis_subchart.id,
+            subchart_series_id=self.basis_series.id
+        )
+        self.chart.run_script(js_patch_2)
+        
         self.basis_series.precision(2)
         self.chart.run_script(f"{self.basis_series.id}.series.applyOptions({{ priceScaleId: 'right', priceFormat: {{ type: 'price', precision: 2, minMove: 0.01 }} }})")
         
-        # [BugFix 2] 攔截 setCrosshairPosition 避免 Value is null 崩潰
-        js_patch_2 = f'''
-        const orig_set = {self.basis_subchart.id}.chart.setCrosshairPosition.bind({self.basis_subchart.id}.chart);
-        {self.basis_subchart.id}.chart.setCrosshairPosition = function(price, time, series) {{
-            if (!series) {{
-                series = {self.basis_series.id}.series;
-            }}
-            try {{
-                if (series) orig_set(price, time, series);
-            }} catch(e) {{}}
-        }};
-        '''
-        self.chart.run_script(js_patch_2)
+
         
         self._chart_shown = False
 
@@ -122,6 +108,8 @@ class ChartBuilder:
             self._is_switching = False
 
     def plot(self, df: pl.DataFrame):
+        from visualization.style_config import ColorScheme
+        
         if df.is_empty():
             print("[Warning] No data to plot.")
             return
@@ -132,6 +120,54 @@ class ChartBuilder:
 
         # 2. 繪製/更新 K 線
         self.chart.set(df_kbars)
+
+        # 2.5 繪製結算日垂直線 (動態對齊當天最後一根 K 棒)
+        try:
+            import os
+            import pandas as pd
+            from config.settings import SETTLEMENT_CSV_PATH
+            if os.path.exists(SETTLEMENT_CSV_PATH):
+                # 1. 清除舊的垂直線 (避免切換週期時重複疊加)
+                if hasattr(self, '_settlement_lines'):
+                    for line in self._settlement_lines:
+                        try:
+                            line.delete()
+                        except:
+                            pass
+                self._settlement_lines = []
+
+                settlements = pd.read_csv(SETTLEMENT_CSV_PATH)
+                settle_dates = set(pd.to_datetime(settlements['date']).dt.date)
+                
+                # 計算 K 棒對應的日期
+                temp_time = pd.to_datetime(df_kbars['time'])
+                df_kbars['date_only'] = temp_time.dt.date
+                
+                # 2. 篩選出結算日的 K 棒，並排除夜盤 (時間 <= 13:30)
+                hour_mask = (temp_time.dt.hour < 13) | ((temp_time.dt.hour == 13) & (temp_time.dt.minute <= 30))
+                settle_bars = df_kbars[
+                    (df_kbars['date_only'].isin(settle_dates)) & hour_mask
+                ]
+                
+                if not settle_bars.empty:
+                    # 抓取每個結算日「日盤最晚」的一根 K 棒時間
+                    settle_times = settle_bars.groupby('date_only')['time'].max()
+                    
+                    for d, t in settle_times.items():
+                        if isinstance(t, pd.Timestamp):
+                            t_val = t.to_pydatetime()
+                        else:
+                            t_val = pd.to_datetime(t).to_pydatetime()
+                            
+                        # 依據您的需求，只在「副圖」畫上垂直虛線，保持主圖乾淨
+                        l2 = self.basis_subchart.vertical_line(
+                            time=t_val, 
+                            color='rgba(255, 255, 255, 0.3)', 
+                            style='dashed'
+                        )
+                        self._settlement_lines.extend([l2])
+        except Exception as e:
+            print(f"[Chart] Error drawing settlement lines: {e}")
 
         # 3. 繪製/更新成交量
         if self.vol_series is None:
@@ -154,7 +190,6 @@ class ChartBuilder:
         # 4.5. 期現價差附圖繪製
         if 'basis' in df.columns:
             if 'session' in df.columns:
-                from visualization.style_config import ColorScheme
                 
                 # 方案 A: 零軸柱狀圖 + 四種狀態顏色
                 basis_color_expr = (

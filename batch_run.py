@@ -1,6 +1,12 @@
 # batch_run.py
 import pandas as pd
+import sys
+import io
 from datetime import datetime, timedelta
+
+# 修正 Windows UTF-8 輸出問題 (避免印出 Emoji 時崩潰)
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
 from adapters.shioaji_source import ShioajiSource
 from main_etl import run_pipeline
 
@@ -37,8 +43,8 @@ def run_batch_job(start_date, end_date):
         source.logout()
 
 if __name__ == "__main__":
-    # 設定您要補資料的區間
-    START = "2023-01-01"
-    END   = "2026-03-31"
+    # 設定您要補資料的區間 (回補 2020~2022 年 TXFR2 遺失的資料)
+    START = "2020-01-01"
+    END   = "2022-12-31"
     
     run_batch_job(START, END)

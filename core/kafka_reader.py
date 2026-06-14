@@ -2,7 +2,7 @@ import logging
 import polars as pl
 import threading
 from confluent_kafka import Consumer, TopicPartition
-from typing import Optional, List
+from typing import Optional, List, Union
 from core.data_schemas.txf_data_pb2 import Tick
 
 class KafkaTickReader:
@@ -11,9 +11,9 @@ class KafkaTickReader:
     This implementation uses a strict threading.RLock() to prevent `Erroneous state` exceptions
     when the UI thread queries gap history concurrently with the background thread polling live ticks.
     """
-    def __init__(self, broker_url: str = "192.168.1.50:9092", topic: str = "txf-tick", group_id: str = "txf_chart_live_v2"):
+    def __init__(self, broker_url: str = "192.168.1.50:9092", topics: Union[str, List[str]] = "txf-tick", group_id: str = "txf_chart_live_v2"):
         self.broker_url = broker_url
-        self.topic = topic
+        self.topics = [topics] if isinstance(topics, str) else topics
         self.group_id = group_id
         self.consumer: Optional[Consumer] = None
         self.logger = logging.getLogger("KafkaTickReader")
@@ -38,114 +38,113 @@ class KafkaTickReader:
             'socket.nagle.disable': True
         }
         self.consumer = Consumer(conf)
-        self.logger.info(f"Connected to Kafka broker: {self.broker_url}, Topic: {self.topic}")
+        self.logger.info(f"Connected to Kafka broker: {self.broker_url}, Topics: {self.topics}")
 
-    def fetch_gap_ticks(self, since_ts_ms: int) -> pl.DataFrame:
+    def fetch_gap_ticks(self, since_ts_ms: int) -> dict:
         """
-        Fetches all historical ticks from since_ts_ms to the current High Watermark.
-        Thread-safe: Blocks `poll_new_ticks` during execution to prevent State/Offset crashes.
+        Fetches all historical ticks from since_ts_ms to the current High Watermark for all topics.
+        Returns a dictionary mapping topic name to its historical pl.DataFrame.
         """
         with self.lock:
             if not self.consumer:
                 raise RuntimeError("Kafka consumer not connected.")
             
-            self.logger.info(f"Gap Replay: Fetching history from timestamp {since_ts_ms}...")
+            self.logger.info(f"Gap Replay: Fetching history from timestamp {since_ts_ms} for topics {self.topics}...")
+            results = {}
             
-            tp = TopicPartition(self.topic, 0)
-            tp.offset = since_ts_ms
-            
-            # offsets_for_times queries the broker for the earliest offset whose timestamp >= since_ts_ms
-            offsets_found = self.consumer.offsets_for_times([tp], timeout=10.0)
-            start_offset = offsets_found[0].offset if offsets_found and offsets_found[0].offset != -1 else -1
-            
-            if start_offset == -1:
-                self.logger.info("No newer historical data found for the given timestamp.")
-                return pl.DataFrame()
+            for topic in self.topics:
+                tp = TopicPartition(topic, 0)
+                tp.offset = since_ts_ms
                 
-            _, high_watermark = self.consumer.get_watermark_offsets(TopicPartition(self.topic, 0), timeout=5.0)
-            
-            if start_offset >= high_watermark:
-                self.logger.info("Local data is already up to date with Kafka High Watermark.")
-                return pl.DataFrame()
+                offsets_found = self.consumer.offsets_for_times([tp], timeout=10.0)
+                start_offset = offsets_found[0].offset if offsets_found and offsets_found[0].offset != -1 else -1
                 
-            self.logger.info(f"Replaying from offset {start_offset} to {high_watermark}...")
-            
-            tp.offset = start_offset
-            self.consumer.assign([tp])
-            self.consumer.seek(tp)
-            
-            ticks = []
-            target_count = high_watermark - start_offset
-            fetched = 0
-            
-            while fetched < target_count:
-                msgs = self.consumer.consume(num_messages=2000, timeout=1.0)
-                if not msgs:
-                    self.logger.warning("Kafka poll timeout during history replay.")
-                    break
+                if start_offset == -1:
+                    results[topic] = pl.DataFrame()
+                    continue
                     
-                for msg in msgs:
-                    if msg.error():
-                        continue
-                    if msg.offset() >= high_watermark:
+                _, high_watermark = self.consumer.get_watermark_offsets(TopicPartition(topic, 0), timeout=5.0)
+                
+                if start_offset >= high_watermark:
+                    results[topic] = pl.DataFrame()
+                    continue
+                    
+                tp.offset = start_offset
+                self.consumer.assign([tp])
+                self.consumer.seek(tp)
+                
+                ticks = []
+                target_count = high_watermark - start_offset
+                fetched = 0
+                
+                while fetched < target_count:
+                    msgs = self.consumer.consume(num_messages=2000, timeout=1.0)
+                    if not msgs:
                         break
                         
-                    t = Tick()
-                    t.ParseFromString(msg.value())
-                    
-                    # Extra safety: Ensure we strictly filter out older ticks in case Kafka 
-                    # returned a slightly older segment boundary offset
-                    if t.timestamp_ms >= since_ts_ms:
-                        ticks.append({
-                            "ts": t.timestamp_ms,
-                            "close": t.close / 10000.0,
-                            "volume": t.volume,
-                            "underlying_price": getattr(t, "underlying_price", t.close) / 10000.0
-                        })
-                    fetched += 1
-                    
-            self.logger.info(f"Gap Replay completed. Fetched {len(ticks)} matching ticks.")
-            
-            if not ticks:
-                return pl.DataFrame()
+                    for msg in msgs:
+                        if msg.error(): continue
+                        if msg.offset() >= high_watermark: break
+                            
+                        t = Tick()
+                        t.ParseFromString(msg.value())
+                        
+                        if t.timestamp_ms >= since_ts_ms:
+                            ticks.append({
+                                "ts": t.timestamp_ms,
+                                "close": t.close / 10000.0,
+                                "volume": t.volume,
+                                "underlying_price": getattr(t, "underlying_price", t.close) / 10000.0
+                            })
+                        fetched += 1
+                        
+                # 恢復為 live listening mode
+                tp.offset = high_watermark
+                self.consumer.assign([tp])
                 
-            df = pl.DataFrame(ticks).sort("ts")
-            
-            # Prepare for live polling: move offset to high watermark
-            tp.offset = high_watermark
-            self.consumer.assign([tp])
-            # Removed self.consumer.seek(tp) to prevent Erroneous state crash
-            
-            return df
+                if ticks:
+                    results[topic] = pl.DataFrame(ticks).sort("ts")
+                else:
+                    results[topic] = pl.DataFrame()
+                    
+            # 全部抓完後，將 consumer 訂閱所有 topics
+            self.consumer.subscribe(self.topics)
+            return results
 
-    def poll_new_ticks(self) -> List[dict]:
+    def poll_new_ticks(self) -> dict:
         """
         Polls non-blocking for new live ticks.
-        Thread-safe: Will politely wait if the UI thread is currently running `fetch_gap_ticks`.
+        Returns a dictionary mapping topic name to a list of dict ticks.
         """
         with self.lock:
             if not self.consumer:
-                return []
+                return {}
                 
             msgs = self.consumer.consume(num_messages=500, timeout=0.01) # 10ms Non-blocking
             
         if not msgs:
-            return []
+            return {}
             
-        new_ticks = []
+        results = {}
         for msg in msgs:
             if msg.error():
                 continue
+            
+            topic = msg.topic()
             t = Tick()
             t.ParseFromString(msg.value())
-            new_ticks.append({
+            
+            if topic not in results:
+                results[topic] = []
+                
+            results[topic].append({
                 "ts": t.timestamp_ms,
                 "close": t.close / 10000.0,
                 "volume": t.volume,
                 "underlying_price": getattr(t, "underlying_price", t.close) / 10000.0
             })
             
-        return new_ticks
+        return results
 
     def close(self):
         with self.lock:
