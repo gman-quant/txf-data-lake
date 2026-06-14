@@ -15,7 +15,8 @@ class ChartBuilder:
         self.combine_sessions = combine_sessions
         self.on_timeframe_change_cb = on_timeframe_change_cb
 
-        self.chart = Chart(toolbox=True)
+        # 1. 建立圖表與套用主題 (設定 inner_height 預留空間給下方的附圖)
+        self.chart = Chart(toolbox=True, inner_width=1.0, inner_height=0.75)
         ColorScheme.apply_theme(self.chart)
         
         # 1. 設置 Title
@@ -40,6 +41,48 @@ class ChartBuilder:
         self.vol_series = None
         self.taiex_line = None
         self.ma_lines = {}
+        
+        # 5. 期現價差附圖 (Basis Spread)
+        self.basis_subchart = self.chart.create_subchart(position='bottom', width=1, height=0.25, sync=True)
+        ColorScheme.apply_theme(self.basis_subchart)
+        self.basis_subchart.legend(visible=True)
+        
+        # [BugFix 1] 繞過 lightweight-charts-python 內部在 sync=True 時的 Legend 同步崩潰 Bug，並關閉 K/M 縮寫
+        js_patch = f'''
+        if ({self.basis_subchart.id}.legend) {{
+            const orig = {self.basis_subchart.id}.legend.legendHandler.bind({self.basis_subchart.id}.legend);
+            {self.basis_subchart.id}.legend.legendHandler = function(p, s) {{
+                if (s && !p.seriesData) return;
+                orig(p, s);
+            }};
+            // 覆寫內建的縮寫邏輯 (K/M)，強制顯示完整原始數值
+            {self.basis_subchart.id}.legend.shorthandFormat = function(t) {{ return t.toString(); }};
+        }}
+        '''
+        self.chart.run_script(js_patch)
+
+        self.basis_series = self.basis_subchart.create_histogram(name='期現價差 (Basis)', color='#FFA500')
+        self.basis_series.horizontal_line(0, color='rgba(255, 255, 255, 0.4)', width=1, style='dashed')
+        
+        # 強制設定為價格格式 (2位小數)，禁止轉換為 'K' (千) 這種成交量縮寫
+        # [BugFix 2] 強制將 priceScaleId 改為 'right'，打破套件預設的隱藏刻度行為
+        self.basis_series.precision(2)
+        self.chart.run_script(f"{self.basis_series.id}.series.applyOptions({{ priceScaleId: 'right', priceFormat: {{ type: 'price', precision: 2, minMove: 0.01 }} }})")
+        
+        # [BugFix 2] 攔截 setCrosshairPosition 避免 Value is null 崩潰
+        js_patch_2 = f'''
+        const orig_set = {self.basis_subchart.id}.chart.setCrosshairPosition.bind({self.basis_subchart.id}.chart);
+        {self.basis_subchart.id}.chart.setCrosshairPosition = function(price, time, series) {{
+            if (!series) {{
+                series = {self.basis_series.id}.series;
+            }}
+            try {{
+                if (series) orig_set(price, time, series);
+            }} catch(e) {{}}
+        }};
+        '''
+        self.chart.run_script(js_patch_2)
+        
         self._chart_shown = False
 
     def apply_time_visibility(self, tf: str):
@@ -100,6 +143,33 @@ class ChartBuilder:
         else:
             if self.taiex_line is not None:
                 self.taiex_line.set(pd.DataFrame(columns=['time', 'TAIEX']))
+
+        # 4.5. 期現價差附圖繪製
+        if 'basis' in df.columns:
+            if 'session' in df.columns:
+                from visualization.style_config import ColorScheme
+                
+                # 方案 A: 零軸柱狀圖 + 四種狀態顏色
+                basis_color_expr = (
+                    pl.when(pl.col("basis") >= 0)
+                    .then(pl.when(pl.col("session") == "Night").then(pl.lit(ColorScheme.C_UP_DIM)).otherwise(pl.lit(ColorScheme.C_UP)))
+                    .otherwise(pl.when(pl.col("session") == "Night").then(pl.lit(ColorScheme.C_DN_DIM)).otherwise(pl.lit(ColorScheme.C_DN)))
+                )
+                
+                basis_data = df.select([
+                    'time', 
+                    pl.col('basis').round(2).alias('期現價差 (Basis)'),
+                    basis_color_expr.alias('color')
+                ]).drop_nulls().to_pandas()
+            else:
+                basis_data = df.select(['time', pl.col('basis').round(2).alias('期現價差 (Basis)')]).drop_nulls().to_pandas()
+                
+            if not basis_data.empty:
+                self.basis_series.set(basis_data)
+                print("   - Added/Updated Basis Subchart")
+        else:
+            print("   - No basis column found in df!")
+            self.basis_series.set(pd.DataFrame(columns=['time', '期現價差 (Basis)', 'color']))
 
         # 5. 全家桶指標繪製
         indicators = []
@@ -191,3 +261,23 @@ class ChartBuilder:
                     self.chart.run_script(f'{self.chart.id}.legend._lines.find((l) => l.series === {line_obj.id}.series).series.update({json.dumps(line_data)})')
                 except Exception as e:
                     pass
+                    
+        # 5. 直接更新 Basis Subchart
+        if 'basis' in live_bar and live_bar['basis'] is not None:
+            basis_val = round(float(live_bar['basis']), 2)
+            basis_color = '#FFA500'
+            if 'session' in live_bar:
+                from visualization.style_config import ColorScheme
+                session = live_bar['session']
+                if basis_val >= 0:
+                    basis_color = ColorScheme.C_UP_DIM if session == 'Night' else ColorScheme.C_UP
+                else:
+                    basis_color = ColorScheme.C_DN_DIM if session == 'Night' else ColorScheme.C_DN
+                    
+            basis_data = {'time': time_val, 'value': basis_val, 'color': basis_color}
+            try:
+                # 由於附圖沒有 main legend，我們直接透過 subchart series 呼叫更新
+                # 若 .id 映射的是 JS 的 series id：
+                self.chart.run_script(f'{self.basis_series.id}.series.update({json.dumps(basis_data)})')
+            except Exception as e:
+                pass

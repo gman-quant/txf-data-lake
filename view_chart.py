@@ -230,8 +230,14 @@ def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool
                         "wickColor": last_row["wickColor"][0],
                         "vol_color": last_row["vol_color"][0]
                     }
+                    if "session" in last_row.columns:
+                        live_bar["session"] = last_row["session"][0]
+                        
                     if "TAIEX" in last_row.columns and last_row["TAIEX"][0] is not None:
                         live_bar["TAIEX"] = float(last_row["TAIEX"][0])
+                        
+                    if "basis" in last_row.columns and last_row["basis"][0] is not None:
+                        live_bar["basis"] = float(last_row["basis"][0])
                         
                     for col in last_row.columns:
                         if col.startswith("ma"):
@@ -464,6 +470,10 @@ def main():
                 if "TAIEX" in df_proc.columns:
                     df_proc = df_proc.with_columns(
                         pl.col("TAIEX").fill_null(strategy="forward").fill_null(strategy="backward")
+                    )
+                    # 計算期現價差
+                    df_proc = df_proc.with_columns(
+                        (pl.col("close") - pl.col("TAIEX")).alias("basis")
                     )
             
         # Ensure strict chronological order for lightweight-charts
