@@ -11,7 +11,7 @@ from adapters.shioaji_source import ShioajiSource
 from core.resampler import resample_to_kbars
 
 # 定義目標商品清單
-TARGET_SYMBOLS = ['TXF', 'TSE']
+TARGET_SYMBOLS = ['TXF', 'TSE', 'TXFR2']
 
 def run_pipeline(date_str, shared_source=None):
     print(f"🚀 Starting ETL Pipeline for {date_str}...")

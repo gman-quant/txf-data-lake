@@ -190,7 +190,7 @@ def load_historical_raw(symbol, timeframe, date, end_date, combined, max_bars=20
     return df_raw
 
 # --- [Core Logic] 背景即時更新執行緒 ---
-def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False, is_simulating_history: bool = False):
+def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool, simulate_flow: bool = False, is_simulating_history: bool = False, delta_manager_r2=None):
     import time
     
     while not getattr(viewer, '_chart_shown', False):
@@ -274,9 +274,14 @@ def start_live_kafka_listener(delta_manager, viewer, symbol: str, combined: bool
                     on_tick_cb(None)
             else:
                 ticks = delta_manager.kafka_reader.poll_new_ticks()
-                if ticks:
-                    for t in ticks:
-                        on_tick_cb(t)
+                ticks_r2 = delta_manager_r2.kafka_reader.poll_new_ticks() if delta_manager_r2 else []
+                
+                if ticks or ticks_r2:
+                    if ticks_r2:
+                        delta_manager_r2.add_ticks(ticks_r2)
+                    if ticks:
+                        for t in ticks:
+                            on_tick_cb(t)
                 else:
                     # 若無新資料，手動呼叫 on_tick_cb 觸發每 0.5s 的 UI 更新檢查
                     on_tick_cb(None)
@@ -323,7 +328,9 @@ def main():
 
     # 初始化 LiveDeltaManager
     delta_manager_instance = None
+    delta_manager_instance_r2 = None
     kafka_reader_instance = None
+    kafka_reader_instance_r2 = None
 
     if args.live:
         from core.kafka_reader import KafkaTickReader
@@ -381,6 +388,16 @@ def main():
 
             simulate_flow = bool(args.simulate_cut_date) and args.progressive
             delta_manager_instance.initialize(base_ts_ms, simulate_flow)
+            
+            # --- 建立 R2 專屬 Kafka Reader ---
+            try:
+                unique_group_r2 = f"txf_chart_live_r2_{uuid.uuid4().hex[:8]}"
+                # r2 專用 topic 名稱與 streaming server 的 config 一致
+                kafka_reader_instance_r2 = KafkaTickReader(broker_url=args.kafka_broker, topic="txfr2-tick", group_id=unique_group_r2)
+                delta_manager_instance_r2 = LiveDeltaManager(kafka_reader_instance_r2)
+                delta_manager_instance_r2.initialize(base_ts_ms, simulate_flow)
+            except Exception as e_r2:
+                print(f"[Kafka Warning] Could not connect or initialize R2 stream: {e_r2}")
                             
         except Exception as e:
             print(f"[Kafka Warning] Could not connect or initialize: {e}")
@@ -439,17 +456,20 @@ def main():
         df_proc = DataProcessor.process_data(df_raw, tf, is_combined)
         
         # --- 封裝外部商品載入與合併邏輯 ---
-        def _fetch_and_join_external(ext_symbol, cache_dict, target_col):
+        def _fetch_and_join_external(ext_symbol, cache_dict, target_col, dm_instance=None):
             nonlocal df_proc
             if orig_tf not in cache_dict:
                 cache_dict[orig_tf] = load_historical_raw(ext_symbol, tf, args.date, args.end_date, is_combined, max_bars=args.max_bars, simulate_cut_date=args.simulate_cut_date)
             ext_hist = cache_dict[orig_tf]
             
-            # 若為 TSE，我們可以從 Tick 中的 underlying_price 取得即時大盤指數
-            if delta_manager_instance is not None and ext_symbol == 'TSE':
-                ticks_df = delta_manager_instance.get_ticks()
-                if "underlying_price" in ticks_df.columns:
+            # 從指定的 delta_manager 取得即時大盤/次月指數
+            if dm_instance is not None:
+                ticks_df = dm_instance.get_ticks()
+                if "underlying_price" in ticks_df.columns and ext_symbol == 'TSE':
                     ext_ticks = ticks_df.select([pl.col("ts"), pl.col("underlying_price").alias("close"), pl.col("volume")])
+                    ext_raw = perform_delta_merge(ext_hist, ext_ticks, tf, ext_symbol, is_combined)
+                elif "close" in ticks_df.columns:
+                    ext_ticks = ticks_df.select([pl.col("ts"), pl.col("close"), pl.col("volume")])
                     ext_raw = perform_delta_merge(ext_hist, ext_ticks, tf, ext_symbol, is_combined)
                 else:
                     ext_raw = ext_hist
@@ -472,13 +492,13 @@ def main():
 
         # 5. TSE 對照線處理
         if not args.no_tse and args.symbol == 'TXF':
-            _fetch_and_join_external('TSE', cache_tse_raw, "TAIEX")
+            _fetch_and_join_external('TSE', cache_tse_raw, "TAIEX", dm_instance=delta_manager_instance)
             if "TAIEX" in df_proc.columns and "close" in df_proc.columns:
                 df_proc = df_proc.with_columns((pl.col("close") - pl.col("TAIEX")).alias("basis"))
             
         # 6. TXFR2 (次月) 處理
         if args.symbol == 'TXF':
-            _fetch_and_join_external('TXFR2', cache_r2_raw, "TXFR2")
+            _fetch_and_join_external('TXFR2', cache_r2_raw, "TXFR2", dm_instance=delta_manager_instance_r2)
             if "TXFR2" in df_proc.columns:
                 if "TAIEX" in df_proc.columns:
                     df_proc = df_proc.with_columns((pl.col("TXFR2") - pl.col("TAIEX")).alias("r2_basis"))
@@ -543,7 +563,7 @@ def main():
         simulate_flow = is_simulating_history and args.progressive
         kafka_thread = threading.Thread(
             target=start_live_kafka_listener,
-            args=(delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow, is_simulating_history),
+            args=(delta_manager_instance, viewer, args.symbol, args.combined, simulate_flow, is_simulating_history, delta_manager_instance_r2),
             daemon=True
         )
         kafka_thread.start()
