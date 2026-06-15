@@ -101,7 +101,8 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
         pl.col("close").max().alias("high"),
         pl.col("close").min().alias("low"),
         pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume")
+        pl.col("volume").sum().alias("volume"),
+        (pl.col("close") * pl.col("volume")).sum().alias("true_pv_sum")
     ]
     
     # TXF 特殊欄位

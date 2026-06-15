@@ -248,7 +248,8 @@ class ChartBuilder:
                 if label not in self.ma_lines:
                     line = self.chart.create_line(name=label, color=color, width=width)
                     self.ma_lines[label] = line
-                    line.hide_data()
+                    if label != 'VWAP':
+                        line.hide_data()
                 
                 if not line_data.empty:
                     self.ma_lines[label].set(line_data)

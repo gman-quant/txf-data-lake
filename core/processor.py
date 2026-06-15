@@ -91,8 +91,12 @@ class DataProcessor:
         if timeframe == '1d':
             vwap_expr = pl.lit(None).alias("vwap")
         else:
-            tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3
-            pv = tp * pl.col("volume")
+            # Phase 0 True VWAP 升級：如果 DataFrame 內建 true_pv_sum，就直接使用它達成 100% 準確度
+            if "true_pv_sum" in df.columns:
+                pv = pl.col("true_pv_sum")
+            else:
+                tp = (pl.col("high") + pl.col("low") + pl.col("close")) / 3
+                pv = tp * pl.col("volume")
             
             # 使用 vwap_group_date 進行分組
             vwap_expr = (
