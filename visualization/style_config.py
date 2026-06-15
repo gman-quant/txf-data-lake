@@ -44,7 +44,8 @@ class ColorScheme:
         240: {'type': 'SMA', 'color': '#4D96FF80', 'width': 2},  # 藍色 (50% 不透明)
     }
 
-    COLOR_VWAP  = '#DA70D6'  # 蘭花紫 (VWAP - 成本)
+    COLOR_VWAP  = '#F5A623'  # 金黃色 (VWAP - 成本)
+    COLOR_TAIEX = '#00E5FF'  # 亮青色
     
     # 疊加副圖顏色配置 (動態折線)
     COLOR_R2_SPOT_POS    = '#FF3333'  # 亮紅 (R2-Spot > 0)

@@ -14,6 +14,8 @@ from core.loader import DataLoader
 from core.processor import DataProcessor
 from visualization.chart_builder import ChartBuilder
 
+# 全域結算日快取
+GLOBAL_SETTLEMENT_DATES = None
 
 
 # --- [Core Logic] Live Delta Manager (全局內存池) ---
@@ -240,6 +242,15 @@ def start_live_kafka_listener(kafka_reader, delta_manager, viewer, symbol: str, 
                     if "basis" in last_row.columns and last_row["basis"][0] is not None:
                         live_bar["basis"] = float(last_row["basis"][0])
                         
+                    if "r2_basis" in last_row.columns and last_row["r2_basis"][0] is not None:
+                        live_bar["r2_basis"] = float(last_row["r2_basis"][0])
+                        
+                    if "calendar_spread" in last_row.columns and last_row["calendar_spread"][0] is not None:
+                        live_bar["calendar_spread"] = float(last_row["calendar_spread"][0])
+                        
+                    if "vwap" in last_row.columns and last_row["vwap"][0] is not None:
+                        live_bar["VWAP"] = float(last_row["vwap"][0])
+                        
                     for col in last_row.columns:
                         if col.startswith("ma"):
                             period = int(col.replace("ma", ""))
@@ -452,41 +463,59 @@ def main():
         else:
             df_raw = df_hist
             
+        if df_raw.is_empty():
+            return pl.DataFrame()
+            
+        # [NEW] [效能優化] 如果是背景即時跳動，提早裁切 1500 根，避免後續繁重的轉倉拼接與 Full Join 處理 2 萬筆資料
+        if background_update and len(df_raw) > 1500:
+            df_raw = df_raw.tail(1500)
+
         # ---------------------------------------------------------
         # [NEW] 智慧轉倉 (Smart Rollover) - 將結算日當天的 K 棒強制換成 TXFR2
         # ---------------------------------------------------------
         if getattr(args, 'smart_rollover', False) and args.symbol == 'TXF' and orig_tf in cache_r2_raw and not df_raw.is_empty():
+            global GLOBAL_SETTLEMENT_DATES
             import pandas as pd
             from datetime import date, timedelta
-            
-            # 1. 統一使用 ts 平移 9 小時來完美對齊「期交所交易日 (Trading Date)」
-            # (15:00 + 9h = 24:00 隔日), (08:45 + 9h = 17:45 當日)
-            # 這樣可以完美解決夜盤屬於哪一個交易日的問題！
-            dates_s = df_raw.select(pl.col("ts").dt.offset_by("9h").dt.date().cast(str)).to_series().unique().to_list()
-            dates_s = [d for d in dates_s if d is not None]
-            
-            # 2. 演算法推算第三個禮拜三的精準結算日 (避開假日)
-            year_months = set([d[:7] for d in dates_s])
-            algorithmic_settlements = set()
-            for ym in year_months:
-                y, m = int(ym[:4]), int(ym[5:7])
-                first_day = date(y, m, 1)
-                first_wed_offset = (2 - first_day.weekday()) % 7
-                third_wed = first_day + timedelta(days=first_wed_offset + 14)
-                third_wed_str = third_wed.strftime("%Y-%m-%d")
-                
-                # 歷史資料中 >= 第三個禮拜三 的第一個交易日
-                valid_dates = [d for d in dates_s if d >= third_wed_str]
-                if valid_dates:
-                    algorithmic_settlements.add(sorted(valid_dates)[0])
+
+            # 若為初次載入 (background_update=False)，計算並快取全域結算日
+            if GLOBAL_SETTLEMENT_DATES is None and not background_update:
+                # 1. 統一使用 ts 平移 9 小時來完美對齊「期交所交易日 (Trading Date)」
+                time_col = "ts" if "ts" in cache_raw[orig_tf].columns else "date"
+                if time_col == "ts":
+                    dates_expr = pl.col(time_col).dt.offset_by("9h").dt.date().cast(str)
+                else:
+                    dates_expr = pl.col(time_col).cast(str)
                     
-            # 3. 讀取 CSV 補足歷史特例 (提早/延後)
-            try:
-                from config.settings import SETTLEMENT_CSV_PATH
-                csv_dates = pd.read_csv(SETTLEMENT_CSV_PATH)['date'].tolist()
-                algorithmic_settlements.update(csv_dates)
-            except:
-                pass
+                dates_s = cache_raw[orig_tf].select(dates_expr).to_series().unique().to_list()
+                dates_s = [d for d in dates_s if d is not None]
+                
+                # 2. 演算法推算第三個禮拜三的精準結算日 (避開假日)
+                year_months = set([d[:7] for d in dates_s])
+                algorithmic_settlements = set()
+                for ym in year_months:
+                    y, m = int(ym[:4]), int(ym[5:7])
+                    first_day = date(y, m, 1)
+                    first_wed_offset = (2 - first_day.weekday()) % 7
+                    third_wed = first_day + timedelta(days=first_wed_offset + 14)
+                    third_wed_str = third_wed.strftime("%Y-%m-%d")
+                    
+                    # 歷史資料中 >= 第三個禮拜三 的第一個交易日
+                    valid_dates = [d for d in dates_s if d >= third_wed_str]
+                    if valid_dates:
+                        algorithmic_settlements.add(sorted(valid_dates)[0])
+                        
+                # 3. 讀取 CSV 補足歷史特例 (提早/延後)
+                try:
+                    from config.settings import SETTLEMENT_CSV_PATH
+                    csv_dates = pd.read_csv(SETTLEMENT_CSV_PATH)['date'].tolist()
+                    algorithmic_settlements.update(csv_dates)
+                except:
+                    pass
+                    
+                GLOBAL_SETTLEMENT_DATES = algorithmic_settlements
+
+            algorithmic_settlements = GLOBAL_SETTLEMENT_DATES if GLOBAL_SETTLEMENT_DATES is not None else set()
                 
             # 4. 針對「結算日」進行偷天換日 (Data Splicing)
             # 將 TXF 的資料全部替換為 TXFR2
@@ -495,6 +524,10 @@ def main():
             # 先確保 ext_raw 也有最新的 Live Ticks (如果是看實時盤)
             if delta_manager_instance_r2 is not None and tf != '1d':
                 ext_raw = perform_delta_merge(ext_raw, delta_manager_instance_r2.get_ticks(), tf, 'TXFR2', is_combined)
+
+            # [效能優化] ext_raw 也必須提早裁切，降低 full join 的負擔
+            if background_update and not ext_raw.is_empty() and len(ext_raw) > 1500:
+                ext_raw = ext_raw.tail(1500)
                 
             if not ext_raw.is_empty():
                 if tf == '1d':
@@ -517,7 +550,11 @@ def main():
                 # 但這不影響，因為我們只在結算日當天的 13:30~13:45 產生 null，而這段時間大盤確實已經收盤了
                 
                 # 找出結算日的 rows (再次使用 ts 平移 9 小時完美對齊交易日)
-                trading_date_expr = pl.col("ts").dt.offset_by("9h").dt.date().cast(str)
+                if "ts" in df_raw.columns:
+                    trading_date_expr = pl.col("ts").dt.offset_by("9h").dt.date().cast(str)
+                else:
+                    trading_date_expr = pl.col("date").cast(str)
+                    
                 is_settlement = trading_date_expr.is_in(list(algorithmic_settlements))
                 
                 # 條件替換：如果是結算日且有 R2 資料，就替換為 R2 的資料，否則維持原樣
@@ -534,16 +571,10 @@ def main():
                 
                 # [CRITICAL FIX] Polars 的 full join 會完全打亂資料的排序
                 # 必須在此刻重新排序，否則後續 TAIEX 的 fill_null(forward) 會將 2020 年的數據填到 2026 年！
-                df_raw = df_raw.sort("ts")
+                sort_col = "ts" if "ts" in df_raw.columns else "date"
+                df_raw = df_raw.sort(sort_col)
                 
         # ---------------------------------------------------------
-
-        if df_raw.is_empty():
-            return pl.DataFrame()
-            
-        # [效能優化] 如果只是背景即時跳動的單根 K 棒更新，我們不需要算全部歷史的指標，裁切最後 500 根 (確保涵蓋 MA240) 即可
-        if background_update and len(df_raw) > 500:
-            df_raw = df_raw.tail(500)
             
         # 3. 套用價格校正
         if args.adjust:
@@ -574,8 +605,8 @@ def main():
             else:
                 ext_raw = ext_hist
                 
-            if background_update and len(ext_raw) > 500:
-                ext_raw = ext_raw.tail(500)
+            if background_update and len(ext_raw) > 1500:
+                ext_raw = ext_raw.tail(1500)
                 
             ext_proc = DataProcessor.process_data(ext_raw, tf, is_combined)
             

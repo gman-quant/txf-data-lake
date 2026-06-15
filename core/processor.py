@@ -81,13 +81,11 @@ class DataProcessor:
             df = df.with_columns(pl.col("date_temp").alias("date"))
 
         # Step B: 🟢 [關鍵修正] 建立 VWAP 專用分組日期 (解決跨午夜斷裂)
-        # 邏輯: 若是夜盤且時間 < 08:00 (代表過了午夜)，歸類到「前一天」的夜盤群組
-        df = df.with_columns(
-            pl.when((pl.col("session") == "Night") & (pl.col("ts").dt.hour() < 8))
-            .then(pl.col("date").dt.offset_by("-1d"))
-            .otherwise(pl.col("date"))
-            .alias("vwap_group_date")
-        )
+        # 邏輯: 使用 ts 平移 9 小時，完美對齊期交所的「交易日」(15:00 夜盤開始即算入隔日)
+        if "ts" in df.columns:
+            df = df.with_columns(pl.col("ts").dt.offset_by("9h").dt.date().alias("vwap_group_date"))
+        else:
+            df = df.with_columns(pl.col("date").alias("vwap_group_date"))
 
         # Step C: 定義 VWAP 表達式 (使用 vwap_group_date)
         if timeframe == '1d':

@@ -180,7 +180,7 @@ class ChartBuilder:
             taiex_data = df.select(['time', 'TAIEX']).drop_nulls().to_pandas()
             if not taiex_data.empty:
                 if self.taiex_line is None:
-                    self.taiex_line = self.chart.create_line(name='TAIEX', color='#00E5FF', width=2)
+                    self.taiex_line = self.chart.create_line(name='TAIEX', color=ColorScheme.COLOR_TAIEX, width=2)
                 self.taiex_line.set(taiex_data)
                 print("   - Added/Updated TAIEX Line (TSE Index)")
         else:
@@ -202,9 +202,9 @@ class ChartBuilder:
                     'time', 
                     pl.col('basis').round(2).alias('期現價差 (Basis)'),
                     basis_color_expr.alias('color')
-                ]).drop_nulls().to_pandas()
+                ]).to_pandas()
             else:
-                basis_data = df.select(['time', pl.col('basis').round(2).alias('期現價差 (Basis)')]).drop_nulls().to_pandas()
+                basis_data = df.select(['time', pl.col('basis').round(2).alias('期現價差 (Basis)')]).to_pandas()
                 
             if not basis_data.empty:
                 self.basis_series.set(basis_data)
@@ -216,7 +216,7 @@ class ChartBuilder:
         # 4.6. R2 相關價差疊加繪製
         if 'r2_basis' in df.columns:
             r2_color_expr = pl.when(pl.col("r2_basis") >= 0).then(pl.lit(ColorScheme.COLOR_R2_SPOT_POS)).otherwise(pl.lit(ColorScheme.COLOR_R2_SPOT_NEG))
-            r2_data = df.select(['time', pl.col('r2_basis').round(2).alias('次月期現 (R2-Spot)'), r2_color_expr.alias('color')]).drop_nulls().to_pandas()
+            r2_data = df.select(['time', pl.col('r2_basis').round(2).alias('次月期現 (R2-Spot)'), r2_color_expr.alias('color')]).to_pandas()
             if not r2_data.empty:
                 self.r2_basis_series.set(r2_data)
         else:
@@ -224,7 +224,7 @@ class ChartBuilder:
             
         if 'calendar_spread' in df.columns:
             cal_color_expr = pl.when(pl.col("calendar_spread") >= 0).then(pl.lit(ColorScheme.COLOR_CAL_SPREAD_POS)).otherwise(pl.lit(ColorScheme.COLOR_CAL_SPREAD_NEG))
-            cal_data = df.select(['time', pl.col('calendar_spread').round(2).alias('跨月轉倉 (R2-R1)'), cal_color_expr.alias('color')]).drop_nulls().to_pandas()
+            cal_data = df.select(['time', pl.col('calendar_spread').round(2).alias('跨月轉倉 (R2-R1)'), cal_color_expr.alias('color')]).to_pandas()
             if not cal_data.empty:
                 self.calendar_series.set(cal_data)
         else:
@@ -235,6 +235,9 @@ class ChartBuilder:
         for period, cfg in ColorScheme.MA_SETTINGS.items():
             ma_type = cfg.get('type', 'SMA')
             indicators.append((f'ma{period}', f'{ma_type}{period}', cfg['color'], cfg['width']))
+            
+        if 'vwap' in df.columns:
+            indicators.append(('vwap', 'VWAP', ColorScheme.COLOR_VWAP, 2))
 
         print(f"[Chart] Chart updating... ({len(df_kbars)} bars)")
 
