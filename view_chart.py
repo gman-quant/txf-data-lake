@@ -538,8 +538,8 @@ def main():
                 # 保留 R1 原始 Close，供後續跨月轉倉計算使用
                 df_raw = df_raw.with_columns(pl.col("close").alias("r1_close_original"))
                 
-                # 取得 ext_raw 的 OHLCV
-                replace_cols = [c for c in ["open", "high", "low", "close", "volume"] if c in ext_raw.columns]
+                # 取得 ext_raw 的 OHLCV 與 true_pv_sum
+                replace_cols = [c for c in ["open", "high", "low", "close", "volume", "true_pv_sum"] if c in ext_raw.columns]
                 rename_map = {c: f"r2_{c}" for c in replace_cols}
                 ext_join = ext_raw.select(join_cols + replace_cols).rename(rename_map).unique(subset=join_cols, keep="last")
                 
