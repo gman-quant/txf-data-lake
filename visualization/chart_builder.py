@@ -76,6 +76,17 @@ class ChartBuilder:
         
 
         
+        # [效能優化 C] 預先讀取結算日 CSV，避免每次 plot() 重複 I/O
+        self._settle_date_set: set = set()
+        try:
+            import os
+            from config.settings import SETTLEMENT_CSV_PATH
+            if os.path.exists(SETTLEMENT_CSV_PATH):
+                _s = pd.read_csv(SETTLEMENT_CSV_PATH)
+                self._settle_date_set = set(pd.to_datetime(_s['date']).dt.date)
+        except Exception:
+            pass
+
         self._chart_shown = False
 
     def apply_time_visibility(self, tf: str):
@@ -121,13 +132,10 @@ class ChartBuilder:
         # 2. 繪製/更新 K 線
         self.chart.set(df_kbars)
 
-        # 2.5 繪製結算日垂直線 (動態對齊當天最後一根 K 棒)
+        # 2.5 繪製結算日垂直線（使用 __init__ 預先快取的日期集合，避免重複 I/O）
         try:
-            import os
-            import pandas as pd
-            from config.settings import SETTLEMENT_CSV_PATH
-            if os.path.exists(SETTLEMENT_CSV_PATH):
-                # 1. 清除舊的垂直線 (避免切換週期時重複疊加)
+            if self._settle_date_set:
+                # 清除舊的垂直線（避免切換週期時重複疊加）
                 if hasattr(self, '_settlement_lines'):
                     for line in self._settlement_lines:
                         try:
@@ -136,38 +144,28 @@ class ChartBuilder:
                             pass
                 self._settlement_lines = []
 
-                settlements = pd.read_csv(SETTLEMENT_CSV_PATH)
-                settle_dates = set(pd.to_datetime(settlements['date']).dt.date)
-                
-                # 計算 K 棒對應的日期
                 temp_time = pd.to_datetime(df_kbars['time'])
                 df_kbars['date_only'] = temp_time.dt.date
-                
-                # 2. 篩選出結算日的 K 棒，並排除夜盤 (時間 <= 13:30)
+
+                # 篩選結算日的 K 棒，並排除夜盤（時間 <= 13:30）
                 hour_mask = (temp_time.dt.hour < 13) | ((temp_time.dt.hour == 13) & (temp_time.dt.minute <= 30))
                 settle_bars = df_kbars[
-                    (df_kbars['date_only'].isin(settle_dates)) & hour_mask
+                    (df_kbars['date_only'].isin(self._settle_date_set)) & hour_mask
                 ]
-                
+
                 if not settle_bars.empty:
-                    # 抓取每個結算日「日盤最晚」的一根 K 棒時間
                     settle_times = settle_bars.groupby('date_only')['time'].max()
-                    
                     for d, t in settle_times.items():
-                        if isinstance(t, pd.Timestamp):
-                            t_val = t.to_pydatetime()
-                        else:
-                            t_val = pd.to_datetime(t).to_pydatetime()
-                            
-                        # 依據您的需求，只在「副圖」畫上垂直虛線，保持主圖乾淨
+                        t_val = t.to_pydatetime() if isinstance(t, pd.Timestamp) else pd.to_datetime(t).to_pydatetime()
                         l2 = self.basis_subchart.vertical_line(
-                            time=t_val, 
-                            color='rgba(255, 255, 255, 0.3)', 
+                            time=t_val,
+                            color='rgba(255, 255, 255, 0.3)',
                             style='dashed'
                         )
-                        self._settlement_lines.extend([l2])
+                        self._settlement_lines.append(l2)
         except Exception as e:
             print(f"[Chart] Error drawing settlement lines: {e}")
+
 
         # 3. 繪製/更新成交量
         if self.vol_series is None:

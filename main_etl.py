@@ -96,6 +96,20 @@ def run_pipeline(date_str, shared_source=None):
             if before != len(tick_df):
                 print(f"   🧹 丟掉 {before - len(tick_df)} 筆週日幻影列(保留 {len(tick_df)})")
 
+            # --- Phase 1.6: 幻影守衛(平日假日/颱風假等「非交易日」)---
+            # Shioaji 對非交易日**不回空、回「上一個交易時段」的資料(帶舊日期)**。
+            #   例:請求清明 4/6(Mon)→ 回 4/2 夜盤,資料最後一筆日期是 4/3。
+            # 既有三道守衛都只防「週末」(resampler `date<6`、_clean_sunday 週日列、validate_lake ②),
+            # 抓不到這種——因為幻影的內容日期是**合法平日**(4/3 週五)。這裡比對
+            #   「資料最後一筆的日期 == 請求日」,不符即整批跳過(raw/kbar 都不存),
+            # 自動涵蓋所有排定假日 + 臨時休市(颱風),**免維護交易日曆**。
+            # (正常交易日:日盤收在請求日 13:45 → 日期一定 == 請求日,故不會誤殺。)
+            req_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            data_date = tick_df.select(pl.col("ts").max().dt.date()).item()
+            if data_date != req_date:
+                print(f"⚠️  {symbol} {date_str}: 抓到的資料日期為 {data_date}(≠請求日)= 非交易日幻影,跳過不存。")
+                continue
+
             # --- Phase 2: Load Raw (存檔;只存下載來且已濾乾淨的) ---
             if downloaded:
                 os.makedirs(raw_dir, exist_ok=True)
@@ -122,8 +136,14 @@ def run_pipeline(date_str, shared_source=None):
                         # 讀取舊檔 -> 合併 -> 去重 -> 寫回
                         try:
                             existing_df = pl.read_parquet(save_path)
-                            # 合併並以 ts 去重 (保留最新的)
-                            final_df = pl.concat([existing_df, kbar_df]).unique(subset=["ts"], keep="last").sort("ts")
+                            # 合併去重:一根 1d bar 的身分是 (date, session),不是 ts。
+                            # ts=該盤第一筆 tick 時間,不同次抓會差幾毫秒 → 用 ts 當鍵會把同一根夜盤
+                            # 認成兩根而重複累積(尤其每週五夜盤來自「週六請求」、被重跑多次)。改用 (date,session)。
+                            final_df = (
+                                pl.concat([existing_df, kbar_df])
+                                .unique(subset=["date", "session"], keep="last")
+                                .sort("ts")
+                            )
                         except Exception as e:
                             print(f"⚠️ Merge error, overwriting: {e}")
                             final_df = kbar_df

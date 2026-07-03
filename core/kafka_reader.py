@@ -51,32 +51,34 @@ class KafkaTickReader:
             
             self.logger.info(f"Gap Replay: Fetching history from timestamp {since_ts_ms} for topics {self.topics}...")
             results = {}
+            live_tps = []  # 儲存最後要給實時監聽用的 Partition 狀態
             
             for topic in self.topics:
                 tp = TopicPartition(topic, 0)
                 tp.offset = since_ts_ms
                 
+                # 1. 尋找時間戳對應的起點
                 offsets_found = self.consumer.offsets_for_times([tp], timeout=10.0)
                 start_offset = offsets_found[0].offset if offsets_found and offsets_found[0].offset != -1 else -1
                 
-                if start_offset == -1:
-                    results[topic] = pl.DataFrame()
-                    continue
-                    
+                # 2. 獲取當下最新水位
                 _, high_watermark = self.consumer.get_watermark_offsets(TopicPartition(topic, 0), timeout=5.0)
                 
-                if start_offset >= high_watermark:
+                if start_offset == -1 or start_offset >= high_watermark:
+                    # 沒歷史資料，或已經是最新的，直接準備進入 Live 模式
                     results[topic] = pl.DataFrame()
+                    live_tps.append(TopicPartition(topic, 0, high_watermark))
                     continue
                     
-                tp.offset = start_offset
-                self.consumer.assign([tp])
-                self.consumer.seek(tp)
+                # 【關鍵修復 1】：直接將 offset 帶入 assign，絕對不要再呼叫 seek()！
+                tp_history = TopicPartition(topic, 0, start_offset)
+                self.consumer.assign([tp_history])
                 
                 ticks = []
                 target_count = high_watermark - start_offset
                 fetched = 0
                 
+                # 3. 抓取歷史缺口資料
                 while fetched < target_count:
                     msgs = self.consumer.consume(num_messages=2000, timeout=1.0)
                     if not msgs:
@@ -84,6 +86,7 @@ class KafkaTickReader:
                         
                     for msg in msgs:
                         if msg.error(): continue
+                        # 防護機制：超過高水位就不再處理，避免干擾後續 Live
                         if msg.offset() >= high_watermark: break
                             
                         t = Tick()
@@ -98,17 +101,18 @@ class KafkaTickReader:
                             })
                         fetched += 1
                         
-                # 恢復為 live listening mode
-                tp.offset = high_watermark
-                self.consumer.assign([tp])
-                
                 if ticks:
                     results[topic] = pl.DataFrame(ticks).sort("ts")
                 else:
                     results[topic] = pl.DataFrame()
                     
-            # 全部抓完後，將 consumer 訂閱所有 topics
-            self.consumer.subscribe(self.topics)
+                # 記錄這個 topic 的最新水位，準備切換為 Live
+                live_tps.append(TopicPartition(topic, 0, high_watermark))
+                
+            # 【關鍵修復 2】：歷史抓完後，將所有 Topics 統一 assign 到最新水位
+            # 完全棄用 self.consumer.subscribe()，跳過 Rebalance 機制
+            self.consumer.assign(live_tps)
+            
             return results
 
     def poll_new_ticks(self) -> dict:
@@ -120,7 +124,7 @@ class KafkaTickReader:
             if not self.consumer:
                 return {}
                 
-            msgs = self.consumer.consume(num_messages=500, timeout=0.01) # 10ms Non-blocking
+            msgs = self.consumer.consume(num_messages=200, timeout=0.1)  # [效能優化] 100ms blocking，讓 OS 釋放 CPU；單批降至 200 筆
             
         if not msgs:
             return {}

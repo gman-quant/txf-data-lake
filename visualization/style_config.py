@@ -28,20 +28,20 @@ class ColorScheme:
     # 2. 顏色層次: 極短線(白/黃) -> 短段(藍/粉) -> 中段(橘/綠) -> 長段(紅/紫)
     MA_SETTINGS = {
         # --- 短線 (實色，專注當下) ---
-        4:   {'type': 'SMA', 'color': '#FFFFFFFF', 'width': 1},  # 白色 (100% 不透明)
-        5:   {'type': 'EMA', 'color': '#FFFF00FF', 'width': 1},  # 黃色 (100% 不透明)
-        9:   {'type': 'SMA', 'color': '#00BFFFFF', 'width': 1},  # 深天藍 (100% 不透明)
-        10:  {'type': 'EMA', 'color': '#FF69B4FF', 'width': 2},  # 亮粉紅 (100% 不透明)
+        5:   {'type': 'SMA', 'color': '#FFFFFFFF', 'width': 1},  # 白色 (100% 不透明)
+        #5:   {'type': 'EMA', 'color': '#FFFF00FF', 'width': 1},  # 黃色 (100% 不透明)
+        10:   {'type': 'SMA', 'color': '#00BFFFFF', 'width': 1},  # 深天藍 (100% 不透明)
+        #10:  {'type': 'EMA', 'color': '#FF69B4FF', 'width': 2},  # 亮粉紅 (100% 不透明)
 
         # --- 中線 (80% 透明度，過渡過濾) ---
-        19:  {'type': 'SMA', 'color': '#FFA500CC', 'width': 1},  # 亮橘色 (80% 不透明)
-        20:  {'type': 'EMA', 'color': '#32CD32CC', 'width': 2},  # 萊姆綠 (80% 不透明)
+        20:  {'type': 'SMA', 'color': '#FFA500CC', 'width': 1},  # 亮橘色 (80% 不透明)
+        #20:  {'type': 'EMA', 'color': '#32CD32CC', 'width': 2},  # 萊姆綠 (80% 不透明)
 
         # --- 長線 (50% 透明度，背景參考，減少搶戲) ---
-        59:  {'type': 'SMA', 'color': '#FF450080', 'width': 1},  # 橘紅色 (50% 不透明)
-        60:  {'type': 'EMA', 'color': '#9370DB80', 'width': 2},  # 中紫色 (50% 不透明)
-        120: {'type': 'SMA', 'color': '#FFD70080', 'width': 2},  # 金金色 (50% 不透明)
-        240: {'type': 'SMA', 'color': '#4D96FF80', 'width': 2},  # 藍色 (50% 不透明)
+        55:  {'type': 'SMA', 'color': '#FF450080', 'width': 1},  # 橘紅色 (50% 不透明)
+        #60:  {'type': 'EMA', 'color': '#9370DB80', 'width': 2},  # 中紫色 (50% 不透明)
+        660: {'type': 'EMA', 'color': '#FFD70080', 'width': 2},  # 金金色 (50% 不透明)
+        3300: {'type': 'EMA', 'color': '#4D96FF80', 'width': 2},  # 藍色 (50% 不透明)
     }
 
     COLOR_VWAP  = '#F5A623'  # 金黃色 (VWAP - 成本)

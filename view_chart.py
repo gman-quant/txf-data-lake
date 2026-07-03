@@ -18,6 +18,121 @@ from visualization.chart_builder import ChartBuilder
 GLOBAL_SETTLEMENT_DATES = None
 
 
+def _detect_today_settlement_date() -> tuple[str, bool]:
+    """
+    啟動時即時判斷「今日是否為結算日」，完全不依賴 Parquet 歷史資料。
+
+    三層確認（依可靠度排序）：
+    1. monthly_settlements.csv 靜態查找
+       → 最可靠，但當月資料通常要等結算後才會更新進去
+    2. 演算法推算：當月「第三個禮拜三」
+       → 台指期標準結算日規則
+    3. 假日順延：若第三個禮拜三是國定假日（非週末），Parquet 當日不存在，
+       則逐日往後找，最多推 5 個工作日，直到找到有 Parquet 的交易日為止
+
+    回傳: (today_trading_date_str: str, is_settlement: bool)
+    """
+    from datetime import date as _date, timedelta as _td
+    import os as _os
+
+    # 當前期交所「交易日」（+9h 使夜盤 15:00 對齊隔日）
+    trading_date = (datetime.now() + timedelta(hours=9)).date()
+    today_str = trading_date.strftime("%Y-%m-%d")
+
+    # ── 層 1：CSV 靜態查找 ──────────────────────────────────────────
+    try:
+        from config.settings import SETTLEMENT_CSV_PATH
+        if _os.path.exists(SETTLEMENT_CSV_PATH):
+            _csv = pd.read_csv(SETTLEMENT_CSV_PATH)
+            if today_str in set(_csv['date'].astype(str).tolist()):
+                print(f"[Settlement] Today {today_str} confirmed via CSV.")
+                return today_str, True
+    except Exception:
+        pass
+
+    # ── 層 2：演算法推算第三個禮拜三 ───────────────────────────────
+    y, m = trading_date.year, trading_date.month
+    first_day = _date(y, m, 1)
+    # 第幾天才是第一個「禮拜三」(weekday 2)
+    first_wed_offset = (2 - first_day.weekday()) % 7
+    third_wed = first_day + _td(days=first_wed_offset + 14)  # 再加 14 天 = 第三個
+
+    # ── 層 3：假日順延 ──────────────────────────────────────────────
+    # 台指期規則：若第三個禮拜三是國定假日，結算日順延到下一個交易日。
+    # 實作策略：嘗試讀取該日的 1m Parquet 是否存在；
+    #   若不存在 → 假日（或週末）→ +1 天繼續試，最多試 5 天。
+    # 若 Parquet 根目錄不可知，則退回僅跳過週末（保守版本）。
+    try:
+        from config.settings import DATA_ROOT
+        parquet_root = _os.path.join(DATA_ROOT, "kbars", "1m", "TXF")
+
+        def _parquet_exists(d: _date) -> bool:
+            """嘗試判斷某日是否有 1m Parquet（= 是否為交易日）"""
+            year_str = d.strftime("%Y")
+            date_str = d.strftime("%Y-%m-%d")
+            path = _os.path.join(parquet_root, year_str, f"{date_str}_TXF_1m.parquet")
+            return _os.path.exists(path)
+
+        candidate = third_wed
+        # 最長連假估計：台灣春節可達 9-10 天（除夕前後各含補假、調整日）
+        # 設 20 天上限，完全覆蓋任何已知連假情境
+        _MAX_SEARCH_DAYS = 20
+        _found = False
+        for _i in range(_MAX_SEARCH_DAYS):
+            # ── 邊界 1：候選日已超過今日 ──────────────────────────────────
+            # 日盤結束後 Parquet 才產生，所以「今天」及「未來」的 Parquet 不存在。
+            # 若走到今日之後還沒找到 Parquet，代表今日就是連假後第一個開市日
+            # = 實際結算日，直接以今日為候選。
+            if candidate > trading_date:
+                candidate = trading_date   # 回退到今日
+                _found = True
+                print(f"[Settlement] Candidate overshot today; "
+                      f"settlement day is today ({trading_date}).")
+                break
+
+            # ── 邊界 2：候選日 == 今日 ────────────────────────────────────
+            # 日盤正在進行中，當然找不到今日的 Parquet。
+            # 既然從第三個禮拜三到今日之間找不到任何過去的 Parquet，
+            # 就代表今日是連假後第一個開市日 = 結算日。
+            if candidate == trading_date:
+                _found = True
+                print(f"[Settlement] Today ({trading_date}) is the first trading day "
+                      f"after the holiday (day session still running, no Parquet yet). "
+                      f"Treating today as settlement day.")
+                break
+
+            # ── 正常情況：查過去日期的 Parquet ─────────────────────────────
+            if candidate.weekday() < 5 and _parquet_exists(candidate):
+                _found = True
+                break  # 找到了有 Parquet 的工作日
+            candidate += _td(days=1)
+
+        if not _found:
+            # 20 天內找不到 → 資料問題，退回純演算法第三禮拜三
+            print(f"[Settlement] ⚠️  Could not find any Parquet within {_MAX_SEARCH_DAYS} days "
+                  f"from {third_wed}. Falling back to raw 3rd Wednesday.")
+            candidate = third_wed
+
+    except Exception:
+        # Fallback：只跳過週末（無法讀取 Parquet 路徑時）
+        candidate = third_wed
+        while candidate.weekday() >= 5:  # 5=Sat, 6=Sun
+            candidate += _td(days=1)
+
+    candidate_str = candidate.strftime("%Y-%m-%d")
+    is_settlement = (today_str == candidate_str)
+
+
+    if is_settlement:
+        print(f"[Settlement] Today {today_str} is algorithmically detected as settlement day "
+              f"(3rd Wed of {y}/{m:02d} → adjusted to {candidate_str}).")
+    else:
+        print(f"[Settlement] Today {today_str} is NOT a settlement day "
+              f"(expected: {candidate_str}).")
+
+    return today_str, is_settlement
+
+
 # --- [Core Logic] Live Delta Manager (全局內存池) ---
 class LiveDeltaManager:
     """
@@ -48,9 +163,19 @@ class LiveDeltaManager:
                 self.live_ticks = new_df
             else:
                 self.live_ticks = self.live_ticks.vstack(new_df)
+                # [效能優化] 保留最近 26 小時的 tick
+                # TXF 一實完整交易循環: 夜盤 15:00 至雔日日盤 13:45 共約 22h45m
+                # 設 26h 淡保留 Parquet 尚未更新時所有透過 Kafka 止接的交易資料
+                _MAX_LIVE_MS = 26 * 3_600_000
+                _cutoff = self.live_ticks["ts"][-1] - _MAX_LIVE_MS
+                self.live_ticks = self.live_ticks.filter(pl.col("ts") >= _cutoff)
                 
     def get_ticks(self) -> pl.DataFrame:
         with self.lock:
+            if self.live_ticks.is_empty():
+                return self.live_ticks
+            # [説明] 直接回傳完整的 live_ticks（已由 add_ticks 統一守門 26h 上限）
+            # 不做二次截斷，避免夜盤資料在凌晨被誤刪
             return self.live_ticks.clone()
 
 # --- [Core Logic] Delta Merge 拼接歷史與實時增量 ---
@@ -105,6 +230,62 @@ def perform_delta_merge(df_raw, ticks_df, timeframe, symbol, combined):
         df_raw = df_raw.filter(pl.col("date") < first_replay_date)
         
     return df_raw.vstack(replay_df)
+
+# --- [效能優化] EMA/SMA 增量更新函數 (O(num_periods)，不重算全量歷史) ---
+def _incremental_ma_update(cached_df: "pl.DataFrame", new_close: float, tf: str, is_combined: bool, is_new_bar: bool = False) -> dict:
+    """
+    以遞推公式計算最新一根 K 棒的 MA 值，避免每 0.5s 重跑 DataProcessor(N 行)。
+    - EMA: ema_new = α × close_new + (1-α) × ema_prev
+    - SMA: sma_new = sma_prev + (close_new - close_drop) / period
+    收斂精度：初始全量計算後永遠 100% 正確（不因 tail(1500) 截斷而失準）。
+
+    is_new_bar=True  → 正在附加新 K 棒：prev = cached[-1]，drop = cached[-period]
+    is_new_bar=False → 正在更新當根 K 棒：prev = cached[-2]，drop = cached[-(period+1)]
+    """
+    from visualization.style_config import ColorScheme
+
+    # 分開日夜盤的日線每天有兩根 K 棒，MA 週期需加倍
+    ma_multiplier = 2 if (tf == '1d' and not is_combined) else 1
+    n = len(cached_df)
+    ma_vals = {}
+
+    for period_d, cfg in ColorScheme.MA_SETTINGS.items():
+        col = f"ma{period_d}"
+        period = period_d * ma_multiplier
+        ma_type = cfg.get('type', 'SMA')
+
+        if col not in cached_df.columns or n < 1:
+            ma_vals[col] = None
+            continue
+
+        # 根據是否為新 K 棒決定「前根」與「掉出窗口那根」的索引
+        if is_new_bar:
+            prev_idx = -1            # 快取最後一行 = 已完成的上一根
+            drop_idx = -period       # 即將掉出 SMA 窗口的那根（距現在 period 根前）
+        else:
+            prev_idx = -2            # 倒數第二行 = 已完成的上一根（[-1] 是正在更新的當根）
+            drop_idx = -(period + 1) # 距現在 period 根前（含當根佔位後移一位）
+
+        if ma_type == 'EMA':
+            alpha = 2.0 / (period + 1)
+            if abs(prev_idx) <= n:
+                prev_val = cached_df[col][prev_idx]
+                ma_vals[col] = (alpha * new_close + (1.0 - alpha) * float(prev_val)) if prev_val is not None else None
+            else:
+                ma_vals[col] = None
+        else:  # SMA
+            prev_sma = cached_df[col][prev_idx] if abs(prev_idx) <= n else None
+            drop_close = (
+                cached_df['close'][drop_idx]
+                if abs(drop_idx) <= n and 'close' in cached_df.columns
+                else None
+            )
+            if prev_sma is not None and drop_close is not None:
+                ma_vals[col] = float(prev_sma) + (new_close - float(drop_close)) / period
+            else:
+                ma_vals[col] = None
+
+    return ma_vals
 
 # --- [Core Logic] Polars 價格校正函數 ---
 def apply_adjustment(df, adj_table_path, timeframe):
@@ -251,11 +432,11 @@ def start_live_kafka_listener(kafka_reader, delta_manager, viewer, symbol: str, 
                     if "vwap" in last_row.columns and last_row["vwap"][0] is not None:
                         live_bar["VWAP"] = float(last_row["vwap"][0])
                         
+                    from visualization.style_config import ColorScheme as _CSy  # [D] 移到迴圈外，避免每 tick 重複 sys.modules 查找
                     for col in last_row.columns:
                         if col.startswith("ma"):
                             period = int(col.replace("ma", ""))
-                            from visualization.style_config import ColorScheme
-                            ma_type = ColorScheme.MA_SETTINGS[period].get('type', 'SMA')
+                            ma_type = _CSy.MA_SETTINGS[period].get('type', 'SMA')
                             label = f"{ma_type}{period}"
                             val = last_row[col][0]
                             live_bar[label] = float(val) if val is not None else None
@@ -294,13 +475,11 @@ def start_live_kafka_listener(kafka_reader, delta_manager, viewer, symbol: str, 
                     if r2_topic in ticks_dict and delta_manager_r2:
                         delta_manager_r2.add_ticks(ticks_dict[r2_topic])
                         
-                    # 觸發更新
+                    # 有新 tick 才觸發 UI 更新
                     on_tick_cb(None, None)
-                else:
-                    # 若無新資料，手動呼叫 on_tick_cb 觸發每 0.5s 的 UI 更新檢查
-                    on_tick_cb(None, None)
+                # [效能優化] 沒有新 tick 就不呼叫 on_tick_cb，避免每 50ms 觸發無意義的全量重算
             
-            time.sleep(0.05)
+            time.sleep(0.1)  # [效能優化] 從 50ms 調整為 100ms，降低 CPU 輪詢壓力
     except Exception as e:
         print(f"[Kafka Live] Thread exception: {e}")
     finally:
@@ -335,10 +514,21 @@ def main():
     
     print(f"[Task] {args.symbol} {args.tf} | {args.date} ~ {args.end_date} {'[Adjusted]' if args.adjust else '[Raw]'}")
 
+    # ── 啟動時立即偵測今日是否為結算日（三層確認）──────────────────────────
+    # 目的：讓快速背景路徑的 Smart Rollover 能在開盤就生效，
+    # 不需等到完整計算路徑（get_data）載入歷史 Parquet 後才建立 GLOBAL_SETTLEMENT_DATES。
+    if getattr(args, 'smart_rollover', False) and args.symbol == 'TXF':
+        global GLOBAL_SETTLEMENT_DATES
+        _today_str, _is_settlement_today = _detect_today_settlement_date()
+        if _is_settlement_today:
+            GLOBAL_SETTLEMENT_DATES = {_today_str}  # 先放今天；完整路徑跑完後會擴充歷史
+
     # 快取字典 (僅存最原始的 Historical Parquet DataFrame，不存合併後的結果)
     cache_raw = {}
     cache_tse_raw = {}
     cache_r2_raw = {}
+    cache_proc = {}          # {orig_tf: pl.DataFrame} – 快取完整處理結果，供增量背景更新使用
+    _ext_last_update = {}    # {orig_tf: float} – 上次完整外部資料 Join 的 Unix 時間戳
     actual_max_date = None
 
     # 初始化 LiveDeltaManager
@@ -420,13 +610,224 @@ def main():
     # 核心資料獲取閉包 (Closure)
     def get_data(tf: str, background_update=False):
         nonlocal actual_max_date
+        global GLOBAL_SETTLEMENT_DATES  # 允許閉包內修改模組層級全域快取
         
         orig_tf = tf
         is_combined = args.combined
         if tf.endswith(" (comb)"):
             is_combined = True
             tf = tf.replace(" (comb)", "").strip()
-        
+
+        # ==================================================================
+        # [效能優化 A+B] 快速背景路徑：增量更新最後一根 K 棒
+        # - O(num_periods) 遞推 MA，跳過每 0.5s 的全量 DataProcessor(1500 行)
+        # - EMA3300 從完整歷史正確初始化後遞推，不受 tail(1500) 截斷（≈40% 誤差）影響
+        # ==================================================================
+        if background_update and orig_tf in cache_proc and not cache_proc[orig_tf].is_empty():
+            cached = cache_proc[orig_tf]
+
+            # 1d 或無 Live Feed → 直接回傳快取
+            if delta_manager_instance is None or tf == '1d':
+                return cached
+
+            # 取得最新 K 棒狀態（perform_delta_merge 才能給出正確的 OHLCV + Volume）
+            ticks_df = delta_manager_instance.get_ticks()
+            if ticks_df.is_empty():
+                return cached
+
+            df_raw_live = perform_delta_merge(
+                cache_raw.get(orig_tf, pl.DataFrame()), ticks_df, tf, args.symbol, is_combined
+            )
+            if df_raw_live.is_empty():
+                return cached
+
+            last_raw = df_raw_live.tail(1)
+            new_close = float(last_raw["close"][0])
+            new_ts    = last_raw["ts"][0]
+
+            # ==================================================================
+            # [Smart Rollover] 快速路徑的結算日換倉
+            # 完整路徑（初始載入）已做 full join 換成 R2，但增量路徑的 new_close
+            # 來自 TXF R1 Kafka ticks，若今天是結算日必須手動換成 R2。
+            # ==================================================================
+            if (getattr(args, 'smart_rollover', False)
+                    and args.symbol == 'TXF'
+                    and GLOBAL_SETTLEMENT_DATES
+                    and delta_manager_instance_r2 is not None):
+                # 以 ts + 9h 對齊期交所「交易日」（與完整路徑使用相同邏輯）
+                import datetime as _dt
+                _trading_dt = (new_ts + _dt.timedelta(hours=9)).date()
+                _trading_date_str = _trading_dt.strftime("%Y-%m-%d")
+
+                if _trading_date_str in GLOBAL_SETTLEMENT_DATES:
+                    r2_ticks = delta_manager_instance_r2.get_ticks()
+                    if not r2_ticks.is_empty() and "close" in r2_ticks.columns:
+                        _r2_close = r2_ticks["close"][-1]
+                        if _r2_close is not None:
+                            # 用 R2 最新 close 取代 R1（high/low 精度由 full path 負責）
+                            new_close = float(_r2_close)
+
+
+
+
+            # ==================================================================
+            # [B] 同根 K 棒狀態判斷：不能只看收盤價，必須兼顧高、低、量 (Order Flow 靈魂)
+            # ==================================================================
+            if "ts" in cached.columns and "close" in cached.columns and len(cached) > 0:
+                _cc = cached["close"][-1]
+                _hh = cached["high"][-1] if "high" in cached.columns else _cc
+                _ll = cached["low"][-1] if "low" in cached.columns else _cc
+                _vv = cached["volume"][-1] if "volume" in cached.columns else 0
+                
+                new_high = float(last_raw["high"][0])
+                new_low = float(last_raw["low"][0])
+                new_vol = float(last_raw["volume"][0])
+
+                # 若 高、低、收、量 完全一致，才代表市場真的沒有新資訊，此時跳過才能達到真優化
+                if (cached["ts"][-1] == new_ts
+                        and _cc is not None
+                        and abs(float(_cc) - new_close) < 0.001
+                        and abs(float(_hh) - new_high) < 0.001
+                        and abs(float(_ll) - new_low) < 0.001
+                        and abs(float(_vv) - new_vol) < 0.001):
+                    return cached
+
+            # 判斷是否為新 K 棒
+            is_new_bar = (
+                "ts" not in cached.columns
+                or len(cached) == 0
+                or cached["ts"][-1] != new_ts
+            )
+
+            # 遞推計算 MA（使用完整快取歷史，精度等同全量計算）
+            ma_vals = _incremental_ma_update(cached, new_close, tf, is_combined, is_new_bar)
+
+            # 計算顏色
+            new_open = float(last_raw["open"][0])
+            session  = str(last_raw["session"][0]) if "session" in last_raw.columns else "Day"
+            is_up    = new_close >= new_open
+            from visualization.style_config import ColorScheme as _CS
+            _color     = _CS.get_color(is_up, session)
+            _vol_color = _CS.get_volume_color(is_up, session)
+
+            # 以快取最後一列為模板（攜帶 TAIEX、TXFR2、vwap 等未明確更新的欄位）
+            # 【關鍵修復】：使用 .cast(cached.schema["欄位"]) 動態對齊型別，避免 Int64 與 Float64 衝突
+            new_row = cached.tail(1).with_columns([
+                pl.lit(new_open).cast(cached.schema["open"]).alias("open"),
+                pl.lit(float(last_raw["high"][0])).cast(cached.schema["high"]).alias("high"),
+                pl.lit(float(last_raw["low"][0])).cast(cached.schema["low"]).alias("low"),
+                pl.lit(new_close).cast(cached.schema["close"]).alias("close"),
+                pl.lit(last_raw["volume"][0]).cast(cached.schema["volume"]).alias("volume"),
+                pl.lit(_color).alias("color"),
+                pl.lit(_color).alias("borderColor"),
+                pl.lit(_color).alias("wickColor"),
+                pl.lit(_vol_color).alias("vol_color"),
+                pl.lit(is_up).alias("is_up"),
+                pl.lit(session).alias("session"),
+            ])
+
+            # 更新 ts（確保型別一致）
+            if "ts" in cached.columns:
+                new_row = new_row.with_columns(
+                    pl.Series("ts", [new_ts]).cast(cached.schema["ts"])
+                )
+
+            # 重新生成 time 欄位（str → Datetime("ns")，與 lightweight-charts 相容）
+            if "ts" in new_row.columns and "time" in cached.columns:
+                new_row = new_row.with_columns(
+                    pl.col("ts").dt.strftime('%Y-%m-%d %H:%M:%S').alias("time")
+                ).with_columns(
+                    pl.col("time").str.to_datetime(format="%Y-%m-%d %H:%M:%S").cast(pl.Datetime("ns"))
+                )
+
+            # 更新 date 欄位
+            if "date" in cached.columns and "ts" in new_row.columns:
+                new_row = new_row.with_columns(pl.col("ts").dt.date().alias("date"))
+
+            # 套用增量 MA 數值
+            _ma_exprs = [
+                pl.lit(float(v)).cast(cached.schema[c]).alias(c)
+                for c, v in ma_vals.items()
+                if c in cached.columns and v is not None
+            ]
+            if _ma_exprs:
+                new_row = new_row.with_columns(_ma_exprs)
+
+            # ==================================================================
+            # [C] 同步更新外部指標 (TAIEX 大盤與 TXFR2 次月)
+            # 解決圖表指標變成「水平死直線」的問題
+            # ==================================================================
+            
+            # 從實時 Tick 池抓取最新的 TAIEX 與 TXFR2
+            live_taiex = ticks_df["underlying_price"][-1] if "underlying_price" in ticks_df.columns else None
+            
+            live_txfr2 = None
+            if delta_manager_instance_r2 is not None:
+                r2_ticks = delta_manager_instance_r2.get_ticks()
+                if not r2_ticks.is_empty() and "close" in r2_ticks.columns:
+                    live_txfr2 = r2_ticks["close"][-1]
+
+            # 1. 更新 TAIEX (大盤) 與正逆價差 (basis)
+            if "TAIEX" in cached.columns:
+                # 如果有收到新的實時大盤點位就用新的，否則沿用上一筆
+                _taiex_val = live_taiex if live_taiex is not None else cached["TAIEX"][-1]
+                if _taiex_val is not None:
+                    new_row = new_row.with_columns([
+                        pl.lit(float(_taiex_val)).cast(cached.schema["TAIEX"]).alias("TAIEX"),
+                        pl.lit(new_close - float(_taiex_val)).alias("basis")
+                    ])
+
+            # 2. 保留原 R1 Close (供跨月轉倉計算使用)
+            if "r1_close_original" in cached.columns:
+                _r1_schema = cached.schema["r1_close_original"] if "r1_close_original" in cached.schema else pl.Float64
+                new_row = new_row.with_columns(
+                    pl.lit(new_close).cast(_r1_schema).alias("r1_close_original")
+                )
+
+            # 3. 更新 TXFR2 (次月) 與相關價差
+            if "TXFR2" in cached.columns:
+                _txfr2_val = live_txfr2 if live_txfr2 is not None else cached["TXFR2"][-1]
+                if _txfr2_val is not None:
+                    new_row = new_row.with_columns(
+                        pl.lit(float(_txfr2_val)).cast(cached.schema["TXFR2"]).alias("TXFR2")
+                    )
+                    
+                    # 更新跨月價差 (Calendar Spread)
+                    if "calendar_spread" in cached.columns:
+                        _r1_col = "r1_close_original"
+                        _r1_val = (
+                            float(cached[_r1_col][-1])
+                            if _r1_col in cached.columns and cached[_r1_col][-1] is not None
+                            else new_close
+                        )
+                        new_row = new_row.with_columns(
+                            pl.lit(float(_txfr2_val) - _r1_val).alias("calendar_spread")
+                        )
+                    
+                    # 更新次月逆價差 (r2_basis)
+                    if "r2_basis" in cached.columns and "TAIEX" in new_row.columns:
+                        _current_taiex = new_row["TAIEX"][0]
+                        if _current_taiex is not None:
+                            new_row = new_row.with_columns(
+                                pl.lit(float(_txfr2_val) - float(_current_taiex)).alias("r2_basis")
+                            )
+
+            # 拼接：新 K 棒 → append；更新當根 → 替換最後一列
+            if is_new_bar:
+                updated = cached.vstack(new_row)
+            else:
+                updated = cached.head(len(cached) - 1).vstack(new_row)
+
+            if len(updated) > args.max_bars:
+                updated = updated.tail(args.max_bars)
+
+            cache_proc[orig_tf] = updated
+            return updated
+
+        # ==================================================================
+        # 完整計算路徑（初始載入 / 切換週期 / 快取尚未建立）
+        # ==================================================================
+
         # 1. 取得歷史資料 (Parquet)
         # [優化] 使用 ThreadPoolExecutor 並行讀取三個商品歷史資料，大幅縮短啟動時間
         import concurrent.futures
@@ -474,7 +875,6 @@ def main():
         # [NEW] 智慧轉倉 (Smart Rollover) - 將結算日當天的 K 棒強制換成 TXFR2
         # ---------------------------------------------------------
         if getattr(args, 'smart_rollover', False) and args.symbol == 'TXF' and orig_tf in cache_r2_raw and not df_raw.is_empty():
-            global GLOBAL_SETTLEMENT_DATES
             import pandas as pd
             from datetime import date, timedelta
 
@@ -669,7 +1069,11 @@ def main():
         # 裁切最大顯示數量
         if len(df_proc) > args.max_bars:
             df_proc = df_proc.tail(args.max_bars)
-            
+
+        # [效能優化] 快取完整處理結果（含正確收斂的 EMA3300 等），供後續背景增量更新使用
+        cache_proc[orig_tf] = df_proc
+        _ext_last_update[orig_tf] = time.time()
+
         return df_proc
 
     # 初始載入
