@@ -43,8 +43,16 @@ uv pip install -r requirements.txt
 
 ### 3\. 設定帳號 (Configuration)
 
-請確保 `adapters/shioaji_source.py` 或您的設定檔中已填入正確的 API Key 與 Secret。
-*(建議使用環境變數或獨立的 secrets.py 檔案管理，勿上傳至 Git)*
+在專案根目錄建立 `.env`（已被 `.gitignore` 排除，勿上傳至 Git），由 `config/settings.py` 透過 python-dotenv 載入：
+
+```
+SHIOAJI_API_KEY=你的APIKey
+SHIOAJI_SECRET_KEY=你的SecretKey
+# 選填：覆寫資料湖位置（預設 D:\txf-data）
+# DATA_ROOT=D:/txf-data
+```
+
+**不要**把金鑰寫進 `adapters/shioaji_source.py` 或任何會進版控的檔案。
 
 -----
 
