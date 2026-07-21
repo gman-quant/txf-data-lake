@@ -15,6 +15,6 @@ confluent-kafka>=2.14.2
 protobuf>=7.35.1
 python-dotenv>=1.2.2
 lightweight-charts>=2.1
-# numpy 刻意釘死:txf-quant-platform 是 Python 3.11,而 numpy>=2.5 要求 >=3.12。
-# 為了四個 repo 版本統一,全部釘在 3.11 也能用的最高版。
+# numpy 刻意釘死(全 workspace 統一版本):
+# 上限來自 txf-gale-engine 的 numba(要求 numpy<2.5),不是 Python 版本。全 workspace 統一。
 numpy==2.4.6
