@@ -1,8 +1,8 @@
 # ⚠️ 歷史文件(已退役)— macOS 自動執行 Shioaji TXF/TSE Collector SOP
 
 > **本文件描述的是舊 macOS 環境的 launchd 排程,已不再使用。**
-> 現行自動化(2026-07 起)= Windows 排程任務 **"TXF Daily Sync"**(週一~五 13:50 + StartWhenAvailable)
-> → workspace 根的 `catchup_sync.sh` → `sync.sh`(main_etl → validate_lake → gale 匯出)。
+> 現行自動化(2026-07-10 起)= Windows 排程任務 **"TXF Daily Sync"**(週一~五 13:50 + StartWhenAvailable)
+> → workspace 根的 **`daily_sync.py`**(單一 Python 編排器,取代舊 `catchup_sync.sh`+`sync.sh`;main_etl → validate_lake → gale 匯出)。
 > 詳見 `CLAUDE.md` 的「自動化」節。以下僅供歷史參考。
 
 **服務名稱（唯一識別）**

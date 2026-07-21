@@ -156,7 +156,14 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
 
     # 5. 通用過濾
     q = q.filter(pl.col("volume") > 0)
-    
+
+    # 5b. 交易日永不為週末 —— 丟掉 date=週六/週日 的列。
+    #     蓋掉三類髒資料:TAIFEX 假日測試盤(date=週六、量個位數)、週日幻影 tick、週一凌晨異常列。
+    #     ⚠️ 必須用 date(交易日)判斷,不可用 ts:週五夜盤尾的 ts 落在「週六凌晨 00:00–05:00」,
+    #        但其 date=週五(已 -1d 歸檔)→ 用 date 判斷會正確保留;用 ts 判斷會誤砍真夜盤。
+    #     polars weekday: 週一=1 … 週五=5, 週六=6, 週日=7 → < 6 即保留週一~週五。
+    q = q.filter(pl.col("date").dt.weekday() < 6)
+
     # 6. 補回 Symbol (使用我們在第1步抓到的值)
     if symbol_val is not None:
         q = q.with_columns(pl.lit(symbol_val).alias("symbol"))

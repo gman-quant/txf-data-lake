@@ -33,7 +33,7 @@ PYTHONUTF8=1 .venv/Scripts/python.exe validate_lake.py --date 2026-07-03  # 驗�
 
 ## 自動化(現行真相;repo 內僅 AutoRun.md 標頭有摘要)
 
-Windows 排程任務 **"TXF Daily Sync"**(週一~五 13:50 + StartWhenAvailable)→ workspace 根 `catchup_sync.sh` → 逐缺日 `sync.sh` → 本 repo 的 main_etl + validate_lake → gale 匯出。日誌在 `C:\Projects\TXF-Trading-Workspace\logs\`。**sync rc=0 不代表 validate 通過**(只警告不中斷)。詳見 workspace skill `data-ops`。
+Windows 排程任務 **"TXF Daily Sync"**(週一~五 13:50 + StartWhenAvailable)→ workspace 根 **`daily_sync.py`**(2026-07-10 起,單一 Python 編排器直接呼 python.exe,取代舊 `catchup_sync.sh`+`sync.sh`)→ 就緒→掃缺→逐缺日四步(本 repo 的 main_etl + validate_lake → gale 匯出)。日誌在 `C:\Projects\TXF-Trading-Workspace\logs\`(`catchup-<date>.log` + `sync_state.json`)。**validate 失敗只警告不中斷**(每步 rc 記進 state)。手動補單日:`python daily_sync.py --date <date>`。詳見 workspace skill `data-ops`。
 
 ## 紅線與現況
 
