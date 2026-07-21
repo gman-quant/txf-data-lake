@@ -80,9 +80,9 @@ class ChartBuilder:
         self._settle_date_set: set = set()
         try:
             import os
-            from config.settings import SETTLEMENT_CSV_PATH
-            if os.path.exists(SETTLEMENT_CSV_PATH):
-                _s = pd.read_csv(SETTLEMENT_CSV_PATH)
+            from config.settings import SETTLEMENT_CALENDAR_PATH
+            if os.path.exists(SETTLEMENT_CALENDAR_PATH):
+                _s = pd.read_csv(SETTLEMENT_CALENDAR_PATH)
                 self._settle_date_set = set(pd.to_datetime(_s['date']).dt.date)
         except Exception:
             pass

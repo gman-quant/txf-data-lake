@@ -15,7 +15,9 @@ DATA_ROOT = os.environ.get("DATA_ROOT", r"D:\txf-data")
 
 # 結算與調整資料目錄
 ADJUSTMENTS_DIR = os.path.join(DATA_ROOT, "adjustments")
-SETTLEMENT_CSV_PATH = os.path.join(ADJUSTMENTS_DIR, "monthly_settlements.csv")
+# 結算日曆(2026-07-21 起唯一來源;舊 monthly_settlements.csv 已退役刪除)。
+# 由 settlement_registry.py 維護,涵蓋過去 + 未來,欄位 date,contract,status,source,algo_date。
+SETTLEMENT_CALENDAR_PATH = os.path.join(ADJUSTMENTS_DIR, "settlement_calendar.csv")
 
 # 定義要轉檔的週期列表
 # 5s:極短線, 1m:原子K, 5m:波段, 1h:長線, 1d:日線

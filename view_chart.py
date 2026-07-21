@@ -23,8 +23,8 @@ def _detect_today_settlement_date() -> tuple[str, bool]:
     啟動時即時判斷「今日是否為結算日」，完全不依賴 Parquet 歷史資料。
 
     三層確認（依可靠度排序）：
-    1. monthly_settlements.csv 靜態查找
-       → 最可靠，但當月資料通常要等結算後才會更新進去
+    1. settlement_calendar.csv 靜態查找
+       → 最可靠，且已涵蓋未來月份（2026-07-21 起）
     2. 演算法推算：當月「第三個禮拜三」
        → 台指期標準結算日規則
     3. 假日順延：若第三個禮拜三是國定假日（非週末），Parquet 當日不存在，
@@ -41,9 +41,9 @@ def _detect_today_settlement_date() -> tuple[str, bool]:
 
     # ── 層 1：CSV 靜態查找 ──────────────────────────────────────────
     try:
-        from config.settings import SETTLEMENT_CSV_PATH
-        if _os.path.exists(SETTLEMENT_CSV_PATH):
-            _csv = pd.read_csv(SETTLEMENT_CSV_PATH)
+        from config.settings import SETTLEMENT_CALENDAR_PATH
+        if _os.path.exists(SETTLEMENT_CALENDAR_PATH):
+            _csv = pd.read_csv(SETTLEMENT_CALENDAR_PATH)
             if today_str in set(_csv['date'].astype(str).tolist()):
                 print(f"[Settlement] Today {today_str} confirmed via CSV.")
                 return today_str, True
@@ -907,8 +907,8 @@ def main():
                         
                 # 3. 讀取 CSV 補足歷史特例 (提早/延後)
                 try:
-                    from config.settings import SETTLEMENT_CSV_PATH
-                    csv_dates = pd.read_csv(SETTLEMENT_CSV_PATH)['date'].tolist()
+                    from config.settings import SETTLEMENT_CALENDAR_PATH
+                    csv_dates = pd.read_csv(SETTLEMENT_CALENDAR_PATH)['date'].tolist()
                     algorithmic_settlements.update(csv_dates)
                 except:
                     pass
@@ -976,10 +976,14 @@ def main():
                 
         # ---------------------------------------------------------
             
-        # 3. 套用價格校正
+        # 3. 套用價格校正 —— **2026-07-21 退役**。
+        # 理由:回溯調整(把換月價差累加進歷史價格)產生的是「不曾存在過的價格」,
+        # 對「平舊倉/開新倉、價差計入成本」的實際轉倉是錯的模型;且此路徑依賴的
+        # txf_adjustment_table_final.csv 已由 adjustments/roll_events.csv 取代
+        # (只記事件、不改價格)。函式 apply_adjustment() 保留備查,旗標保留但不再有作用。
         if args.adjust:
-            ADJ_PATH = r"D:\txf-data\adjustments\txf_adjustment_table_final.csv"
-            df_raw = apply_adjustment(df_raw, ADJ_PATH, tf)
+            print("⚠️ --adjust 已退役(回溯調整不適用轉倉型策略);"
+                  "換月價差請讀 D:/txf-data/adjustments/roll_events.csv。")
             
         # 4. 指標與顏色處理
         df_proc = DataProcessor.process_data(df_raw, tf, is_combined)
