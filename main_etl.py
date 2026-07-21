@@ -15,6 +15,27 @@ from config.calendar_rules import DAY_START
 TARGET_SYMBOLS = ['TXF', 'TSE', 'TXFR2']
 
 
+def _atomic_write_parquet(df, path):
+    """原子寫入:先寫同目錄的暫存檔,再 `os.replace` 換上去。
+
+    為什麼(2026-07-21 加):`df.write_parquet(path)` 直接寫目標檔,行程若在寫到
+    一半被中斷(斷電、被砍、磁碟滿),留下的是**毀損的半成品**。對 1d 年檔尤其致命 ——
+    下次執行讀不動它,就會落進「用單日資料覆寫整年」的回退路徑(見 run_pipeline)。
+    同一檔案系統上的 rename 是原子的:要嘛看到舊檔、要嘛看到完整新檔,沒有中間狀態。
+    """
+    tmp = f"{path}.tmp{os.getpid()}"
+    try:
+        df.write_parquet(tmp)
+        os.replace(tmp, path)          # 原子換檔(Windows/Linux 皆是)
+    except Exception:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+
+
 def _clean_sunday(tick_df, date_str):
     """根治「週日檔 / 週日幻影列」,且**不破壞既有歸檔慣例、零資料遺失**。
 
@@ -113,7 +134,7 @@ def run_pipeline(date_str, shared_source=None):
             # --- Phase 2: Load Raw (存檔;只存下載來且已濾乾淨的) ---
             if downloaded:
                 os.makedirs(raw_dir, exist_ok=True)
-                tick_df.write_parquet(raw_path)
+                _atomic_write_parquet(tick_df, raw_path)
                 print(f"✅ Raw Ticks downloaded & saved: {raw_path}")
 
             # --- Phase 3: Transform & Load K-Bars ---
@@ -145,12 +166,26 @@ def run_pipeline(date_str, shared_source=None):
                                 .sort("ts")
                             )
                         except Exception as e:
-                            print(f"⚠️ Merge error, overwriting: {e}")
-                            final_df = kbar_df
+                            # ⚠️ 2026-07-21 修正資料遺失鏈:
+                            #    原本這裡是 `final_df = kbar_df`(只剩「今天這一天」)然後照樣
+                            #    覆寫整年檔 → **一次讀取失敗就賠掉一整年的 1d bar**,而且只印
+                            #    一行 ⚠️ 不中斷。搭配當時的非原子寫入,故障鏈是:
+                            #      ① 寫到一半被中斷 → 年檔毀損
+                            #      ② 下次 read_parquet 失敗 → 用單日覆寫整年
+                            #    現在改為:**保住既有檔案、跳過本次 1d 更新、用 ❌ 大聲報**
+                            #    (❌ 是 daily_sync Tee 的錯誤標記,會浮到 [SUMMARY])。
+                            #    不 raise 的原因:第 57 行的 try 包住整個 for symbol 迴圈,
+                            #    raise 會讓後續商品(TSE / TXFR2)整個不處理,爆炸半徑過大。
+                            print(f"❌ 1d 年檔讀取失敗,已跳過本次更新以保住既有資料")
+                            print(f"   檔案:{save_path}")
+                            print(f"   原因:{type(e).__name__}: {e}")
+                            print(f"   影響:本商品的 1d 不更新(其他 TF 與其他商品不受影響);")
+                            print(f"        修好該檔前每天都會重複此錯誤 —— 這是刻意的,別忽略。")
+                            continue
                     else:
                         final_df = kbar_df
-                        
-                    final_df.write_parquet(save_path)
+
+                    _atomic_write_parquet(final_df, save_path)
                     print(f"   -> {tf} Updated: {save_path} (Total days: {len(final_df)//2})")
 
                 # Case B: 分時/分秒 (1m, 5s...) -> 存成「日檔」，直接覆蓋
@@ -159,7 +194,7 @@ def run_pipeline(date_str, shared_source=None):
                     os.makedirs(kbar_dir, exist_ok=True)
                     
                     save_path = os.path.join(kbar_dir, f"{date_str}_{symbol}_{tf}.parquet")
-                    kbar_df.write_parquet(save_path)
+                    _atomic_write_parquet(kbar_df, save_path)
                     print(f"   -> {tf} Saved: {save_path} ({len(kbar_df)} bars)")
 
     except Exception as e:
