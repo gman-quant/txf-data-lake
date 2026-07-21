@@ -1,7 +1,20 @@
-python-dotenv
-lightweight-charts
-polars[rtcompat]
-pyarrow
-shioaji[speed]
-confluent-kafka
-protobuf
+# 直接依賴 + 已測過的版本下限(2026-07-21 全面升級並驗證)。
+# 精確重現用 requirements.lock:uv pip sync --python .venv/Scripts/python.exe requirements.lock
+#
+# ⚠️⚠️ polars 一定要帶 [rtcompat] extra ⚠️⚠️
+#   本機 CPU = Intel Xeon E3-1230 V2(Ivy Bridge, 2012),**有 AVX 但沒有 AVX2**。
+#   polars 預設 runtime 需要 AVX2 → 直接 `uv pip install --upgrade polars`(不帶 extra)
+#   會把 polars / polars-runtime-32 升版卻留下舊的 polars-runtime-compat,
+#   版本錯配 → 掉回需 AVX2 的 runtime → **Illegal instruction 當場崩潰**(2026-07-21 實際踩到)。
+#   升級一律用:uv pip install --upgrade -r requirements.txt(照宣告,extra 才會生效)
+#   三個 polars 套件(polars / polars-runtime-32 / polars-runtime-compat)版本必須一致。
+polars[rtcompat]>=1.43.0
+pyarrow>=25.0.0
+shioaji[speed]>=1.7.0
+confluent-kafka>=2.14.2
+protobuf>=7.35.1
+python-dotenv>=1.2.2
+lightweight-charts>=2.1
+# numpy 刻意釘死:txf-quant-platform 是 Python 3.11,而 numpy>=2.5 要求 >=3.12。
+# 為了四個 repo 版本統一,全部釘在 3.11 也能用的最高版。
+numpy==2.4.6
