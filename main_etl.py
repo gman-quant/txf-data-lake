@@ -2,6 +2,8 @@
 
 import os
 import argparse
+import sys
+import time
 from datetime import datetime
 import polars as pl
 
@@ -13,6 +15,10 @@ from config.calendar_rules import DAY_START
 
 # 定義目標商品清單
 TARGET_SYMBOLS = ['TXF', 'TSE', 'TXFR2']
+
+# 單商品失敗的有界重試(暫時性失誤幾秒內就好;真的還沒有的資料靠 daily_sync 隔日自癒)
+SYMBOL_TRIES = 3
+SYMBOL_RETRY_WAIT = 20               # 秒;線性退避 20s、40s
 
 
 def _atomic_write_parquet(df, path):
@@ -75,12 +81,55 @@ def run_pipeline(date_str, shared_source=None):
     year = date_str[:4]
     month = date_str[5:7]
 
+    failed_symbols = []                  # 本次跑完仍失敗的商品(摘要與 exit code 用)
+
     try:
         # 確保連線 (ShioajiSource 內部有 check，重複呼叫 connect 沒成本)
         source.connect()
 
         for symbol in TARGET_SYMBOLS:
             print(f"\n------ Processing {symbol} ------")
+            # 2026-07-22 事故:原本整個 for 迴圈包在**單一** try/except 裡,
+            #   TSE 拋 KeyError('TSE001') -> 迴圈直接中斷,**排在後面的 TXFR2 也沒跑到**
+            #   (一個商品的暫時性失敗賠掉兩個)。改為**每商品各自 try**:單一商品失敗
+            #   只影響自己,其餘照跑;仍失敗者記入 failed_symbols,由 daily_sync 的
+            #   per-symbol 缺口掃描在後續每天自動重試(自癒),不在這裡無限等。
+            for attempt in range(1, SYMBOL_TRIES + 1):
+                try:
+                    _process_symbol(symbol, date_str, year, month, source)
+                    break
+                except Exception as e:
+                    if attempt < SYMBOL_TRIES:
+                        wait = SYMBOL_RETRY_WAIT * attempt      # 線性退避:20s、40s
+                        print(f'[warn] {symbol} 第 {attempt} 次失敗:{e!r} -> {wait}s 後重試')
+                        time.sleep(wait)
+                    else:
+                        print(f'[FAIL] {symbol} 失敗(重試 {SYMBOL_TRIES} 次):{e!r}')
+                        failed_symbols.append(symbol)
+
+    except Exception as e:
+        print(f'[FAIL] ETL Failed: {e}')
+        failed_symbols.append('(pipeline)')
+    finally:
+        # 只有真正連線過才需要登出
+        if is_local_session and source.is_connected:
+            source.report_usage()
+            source.logout()
+            print('Shioaji Logout.')
+        else:
+            print('Keeping connection alive for next batch...')
+
+    if failed_symbols:
+        # 大聲失敗:daily_sync 記 rc、SUMMARY 才看得見(舊版吞掉例外後 rc 仍是 0)
+        print(f'[FAIL] [{date_str}] 未取得:' + ', '.join(failed_symbols) +
+              ' -- 後續排程會自動重試(daily_sync per-symbol 缺口掃描)')
+    return failed_symbols
+
+
+def _process_symbol(symbol, date_str, year, month, source):
+    """單一商品的 E-T-L(原 for 迴圈本體;抽出來才能逐商品 try/重試)。"""
+    if True:
+        if True:
 
             # 0. 預先計算 Raw Data 路徑
             raw_dir = os.path.join(DATA_ROOT, "raw_ticks", symbol, year, month)
@@ -105,7 +154,7 @@ def run_pipeline(date_str, shared_source=None):
 
                 if tick_df.is_empty():
                     print(f"⚠️  No data found for {symbol} on {date_str}. Skipping.")
-                    continue
+                    return          # 原為 for 迴圈內的 continue(本體已抽成函式)
                 downloaded = True
 
             # --- Phase 1.5: 根治週日檔/週日幻影列(週日請求→清空跳過;其餘日→丟週日幻影列)---
@@ -113,7 +162,7 @@ def run_pipeline(date_str, shared_source=None):
             tick_df = _clean_sunday(tick_df, date_str)
             if tick_df.is_empty():
                 print(f"⚠️  {symbol} {date_str}: 週日/無盤(清空),Skipping.")
-                continue
+                return          # 原為 for 迴圈內的 continue(本體已抽成函式)
             if before != len(tick_df):
                 print(f"   🧹 丟掉 {before - len(tick_df)} 筆週日幻影列(保留 {len(tick_df)})")
 
@@ -129,7 +178,7 @@ def run_pipeline(date_str, shared_source=None):
             data_date = tick_df.select(pl.col("ts").max().dt.date()).item()
             if data_date != req_date:
                 print(f"⚠️  {symbol} {date_str}: 抓到的資料日期為 {data_date}(≠請求日)= 非交易日幻影,跳過不存。")
-                continue
+                return          # 原為 for 迴圈內的 continue(本體已抽成函式)
 
             # --- Phase 2: Load Raw (存檔;只存下載來且已濾乾淨的) ---
             if downloaded:
@@ -142,7 +191,7 @@ def run_pipeline(date_str, shared_source=None):
                 kbar_df = resample_to_kbars(tick_df, tf)
                 
                 if kbar_df.is_empty():
-                    continue
+                    return          # 原為 for 迴圈內的 continue(本體已抽成函式)
 
                 # [分流儲存策略] 根據週期決定儲存策略
                 # Case A: 日線 (1d) -> 存成「年檔」，使用 Append 模式
@@ -181,7 +230,7 @@ def run_pipeline(date_str, shared_source=None):
                             print(f"   原因:{type(e).__name__}: {e}")
                             print(f"   影響:本商品的 1d 不更新(其他 TF 與其他商品不受影響);")
                             print(f"        修好該檔前每天都會重複此錯誤 —— 這是刻意的,別忽略。")
-                            continue
+                            return          # 原為 for 迴圈內的 continue(本體已抽成函式)
                     else:
                         final_df = kbar_df
 
@@ -197,16 +246,6 @@ def run_pipeline(date_str, shared_source=None):
                     _atomic_write_parquet(kbar_df, save_path)
                     print(f"   -> {tf} Saved: {save_path} ({len(kbar_df)} bars)")
 
-    except Exception as e:
-        print(f"❌ ETL Failed: {e}")
-    finally:
-        # 只有真正連線過才需要登出
-        if is_local_session and source.is_connected:
-            source.report_usage()
-            source.logout()
-            print("👋 Shioaji Logout.")
-        else:
-            print("🔄 Keeping connection alive for next batch...")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TXF Data Lake ETL")
@@ -214,5 +253,7 @@ if __name__ == "__main__":
     parser.add_argument('--date', type=str, default=default_date, help='Format: YYYY-MM-DD')
     
     args = parser.parse_args()
-    
-    run_pipeline(args.date)
+
+    failed = run_pipeline(args.date)
+    # rc != 0 才能讓 daily_sync 的 sync_state.json / SUMMARY 反映「有商品沒拿到」
+    sys.exit(1 if failed else 0)

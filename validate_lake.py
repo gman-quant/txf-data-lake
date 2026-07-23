@@ -112,6 +112,41 @@ def _all_kbar_files() -> list[str]:
     ]
 
 
+def _check_completeness(date_str: str) -> list[str]:
+    """當日**商品完整性**檢查(2026-07-22 事故補漏)。
+
+    原本 validate 只驗「已寫入的檔」格式對不對 —— 商品整個沒抓到時它一個檔都看不到,
+    照樣印 PASS(當天 TSE/TXFR2 全缺,SUMMARY 仍只有 ⚠️,不翻 log 發現不了)。
+    這裡改問另一個問題:**該有的商品是不是都在**。
+
+    判準:以 TXF 當基準(有 TXF = 該日有盤)。TXF 自己就沒有 → 非交易日/未跑,不報。
+    只看 5m(每個交易日必有;1d 是年檔、5s/1m 太大不必逐一查)。
+    """
+    year = date_str[:4]
+    def has(sym):
+        return os.path.exists(os.path.join(DATA_ROOT, "kbars", "5m", sym, year,
+                                           f"{date_str}_{sym}_5m.parquet"))
+    if not has("TXF"):
+        return []                     # 無基準:非交易日或整日沒跑,交給既有流程判斷
+    missing = [s for s in TARGET_SYMBOLS if not has(s)]
+    if not missing:
+        return []
+    # TSE 例外:股市休市但期貨有夜盤的日子(TXF 只有夜盤)本來就沒有 TAIEX,不算缺
+    try:
+        import polars as pl
+        df = pl.read_parquet(os.path.join(DATA_ROOT, "kbars", "5m", "TXF", year,
+                                          f"{date_str}_TXF_5m.parquet"))
+        day_only_night = "session" in df.columns and df.filter(
+            pl.col("session") == "Day").height == 0
+    except Exception:
+        day_only_night = False
+    if day_only_night:
+        missing = [m for m in missing if m != "TSE"]
+        if not missing:
+            return []
+    return [f"當日商品不齊:缺 {', '.join(missing)}(TXF 有資料 = 該日有盤)"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="TXF Data Lake 驗證器")
     parser.add_argument("--date", type=str, default=datetime.now().strftime("%Y-%m-%d"),
@@ -127,7 +162,17 @@ def main():
         scope = f"{args.date} 寫入的 {len(files)} 檔"
 
     print(f"🔍 驗證範圍:{scope}")
+
+    # 完整性閘(單日模式才有意義):商品沒抓到時「零檔可驗」也算 FAIL,不再靜靜 PASS
+    incomplete = [] if args.all else _check_completeness(args.date)
+    for msg in incomplete:
+        print(f"❌ {msg}")
+
     if not files:
+        if incomplete:
+            print("-" * 60)
+            print("❌ FAIL:當日商品不齊(見上)。")
+            return 1
         print("⚠️  找不到檔案(該日可能無盤/未 sync)。")
         return 0
 
@@ -142,10 +187,13 @@ def main():
                 print(f"      - {it}")
 
     print("-" * 60)
-    if failed == 0:
+    if failed == 0 and not incomplete:
         print(f"✅ PASS:{len(files)} 檔全數符合格式與內容約束。")
         return 0
-    print(f"❌ FAIL:{failed}/{len(files)} 檔有問題(見上)。")
+    if failed:
+        print(f"❌ FAIL:{failed}/{len(files)} 檔有問題(見上)。")
+    if incomplete:
+        print("❌ FAIL:當日商品不齊(見上)—— 後續排程會自動重試。")
     return 1
 
 

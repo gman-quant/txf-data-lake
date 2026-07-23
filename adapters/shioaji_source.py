@@ -1,8 +1,18 @@
 # adapters/shioaji_source.py
+import time
+
 import shioaji as sj
 import polars as pl
 from datetime import datetime
 from config.settings import API_KEY, SECRET_KEY
+
+# 合約下載就緒的等待上限(登入後 Shioaji 於背景非同步下載合約集)
+CONTRACT_READY_TRIES = 30
+CONTRACT_READY_INTERVAL = 2          # 秒;30×2s = 最多等 60 秒
+
+# 加權指數合約代碼(依序嘗試):新碼在前、舊碼保留當 fallback
+TSE_INDEX_CODES = ("IX0001", "TSE001")
+
 
 class ShioajiSource:
     def __init__(self):
@@ -14,22 +24,72 @@ class ShioajiSource:
             accounts = self.api.login(API_KEY, SECRET_KEY) # pyright: ignore[reportArgumentType]
             print(f"✅ Shioaji Login: {accounts[0].person_id}")
             self.is_connected = True
+            self._wait_contracts_ready()
 
-    def get_contract(self, symbol_code):
+    def _wait_contracts_ready(self):
+        """等合約集下載完成再放行(輪詢**實際能不能取到合約**)。
+
+        ⚠️ 不要用 `api.Contracts.status` —— 那是已棄用的 Python 類別才有的屬性;
+        實際的 `api.Contracts` 是編譯版物件(builtins.Contracts),沒有該屬性
+        (2026-07-23 實測 AttributeError,寫了等於沒等)。改為直接探測目標合約。
+        登入後合約是背景非同步下載的(期貨 FUT 先到、指數 IND 後到),沒等就取會 KeyError。
         """
-        工廠方法：根據代碼回傳對應的 Contract 物件
+        for i in range(1, CONTRACT_READY_TRIES + 1):
+            try:
+                if list(self.api.Contracts.Indexs.TSE) and                         self.api.Contracts.Futures.TXF.TXFR1 is not None:
+                    if i > 1:
+                        print(f"   ⏳ 合約集就緒(等了 {(i - 1) * CONTRACT_READY_INTERVAL}s)")
+                    return
+            except Exception:
+                pass
+            time.sleep(CONTRACT_READY_INTERVAL)
+        print(f"⚠️  合約集在 {CONTRACT_READY_TRIES * CONTRACT_READY_INTERVAL}s 內仍不完整,"
+              f"繼續(取合約時會重試)。")
+
+    def get_contract(self, symbol_code, tries=3, interval=5):
         """
-        if symbol_code == 'TXF':
-            # 抓期貨近月
-            return self.api.Contracts.Futures.TXF.TXFR1
-        elif symbol_code == 'TSE':
-            # 抓加權指數
-            return self.api.Contracts.Indexs.TSE.TSE001
-        elif symbol_code == 'TXFR2':
-            # 抓期貨次月
-            return self.api.Contracts.Futures.TXF.TXFR2
-        else:
-            raise ValueError(f"Unknown symbol: {symbol_code}")
+        工廠方法：根據代碼回傳對應的 Contract 物件。
+
+        取不到就重試(合約集可能還在下載中)—— 第二道防線,配合 _wait_contracts_ready。
+        """
+        def _pick():
+            if symbol_code == 'TXF':
+                return self.api.Contracts.Futures.TXF.TXFR1      # 期貨近月
+            elif symbol_code == 'TSE':
+                # ⚠️ 2026-07-22 事故根因:Shioaji 的指數合約代碼**變了** ——
+                #   舊碼 `TSE001` 已從合約表消失(2026-07-23 實測:TSE 指數 181 檔內
+                #   查無 TSE001),加權指數現為 **IX0001「發行量加權股價指數」**。
+                #   交叉驗證:IX0001 抓 2026-07-21 的 3,242 筆 tick 與湖內舊 TSE001
+                #   存檔**逐筆對齊、close 最大差 0.0** = 同一標的,歷史資料可直接續接。
+                #   保留舊碼 fallback:哪天官方改回去也不會再斷一次。
+                for code in TSE_INDEX_CODES:
+                    try:
+                        c = self.api.Contracts.Indexs.TSE[code]
+                        if c is not None:
+                            return c
+                    except Exception:
+                        continue
+                raise KeyError(f"加權指數合約不在合約表內(試過 {TSE_INDEX_CODES})")
+            elif symbol_code == 'TXFR2':
+                return self.api.Contracts.Futures.TXF.TXFR2      # 期貨次月
+            else:
+                raise ValueError(f"Unknown symbol: {symbol_code}")
+
+        last = None
+        for i in range(1, tries + 1):
+            try:
+                c = _pick()
+                if c is not None:
+                    return c
+                last = KeyError(symbol_code)                     # 屬性存在但為 None 也算沒到
+            except ValueError:
+                raise                                            # 代碼打錯是程式 bug,別重試
+            except Exception as e:
+                last = e
+            if i < tries:
+                print(f"   ⏳ {symbol_code} 合約尚未就緒({last!r}),{interval}s 後重試 {i}/{tries - 1}…")
+                time.sleep(interval)
+        raise RuntimeError(f"{symbol_code} 合約取得失敗(重試 {tries} 次):{last!r}")
 
     def fetch_ticks(self, date_str: str, symbol_code: str):
         self.connect()
