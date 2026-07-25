@@ -8,7 +8,7 @@ Shioaji API → `D:/txf-data` parquet 資料湖的 ETL。**本 repo 是湖內 kb
 
 ## 環境與執行
 
-- 一律 `.venv\Scripts\python.exe`(Python 3.12)+ 前綴 `PYTHONUTF8=1`(main_etl/view_chart/fix_kbars **沒有**自我 reconfigure stdout,cp950 會炸)。
+- 一律 `.venv\Scripts\python.exe`(Python 3.13;2026-07 工作站統一到 3.13)+ 前綴 `PYTHONUTF8=1`(main_etl/view_chart/fix_kbars **沒有**自我 reconfigure stdout,cp950 會炸)。
 - 設定在 `config/settings.py`:DATA_ROOT(env 覆寫,預設 D:\txf-data)、TIMEFRAMES=[5s,1m,5m,1h,1d]、金鑰從 `.env` 載入。
 - `.env` 含 API 金鑰(從第一個 commit 起即 gitignore,**未進 git 史**)。**絕不讀取、絕不印出、絕不 commit。**
 
