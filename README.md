@@ -5,13 +5,14 @@
 
 ```
 永豐 Shioaji API
-   │
-   ├─（歷史·本專案）→ txf-data-lake ──Polars──→ Parquet 資料湖  ─┐
-   │                                        (D:\txf-data)      ├─→ txf-quant-platform
-   └─（即時）→ txf-streaming-server ─Protobuf→ Kafka ───────────┘   (看盤 / 回測)
+   ├─（即時）→ txf-streaming-server ──Protobuf──→ Kafka ─────────┐
+   └─（歷史）→ 【本專案】txf-data-lake ─Polars→ Parquet ─────────┤
+                                          (D:\txf-data)        ├─→ txf-quant-platform（看盤/回測）
+                                                               └─→ txf-gale-engine（戰情室看板）
 ```
 
 **本專案不碰 Kafka**,只用 Shioaji 歷史 API。即時行情是 `txf-streaming-server` 的事。
+下游兩個消費端(platform / gale)都會讀本專案產出的 Parquet。
 
 | | |
 |---|---|
