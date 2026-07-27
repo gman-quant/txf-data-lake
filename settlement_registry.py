@@ -93,37 +93,68 @@ def resolve_scheduled(year: int, month: int) -> Optional[dt.date]:
 # ── TAIFEX OpenAPI ───────────────────────────────────────────────────────
 def _get_json(url: str, timeout: int = 20):
     with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode("utf-8"))
+        # utf-8-sig:期交所 2026-07 起部分端點加 BOM;無 BOM 時與 utf-8 等價
+        return json.loads(r.read().decode("utf-8-sig"))
+
+
+def _get_csv_rows(url: str, timeout: int = 20) -> List[dict]:
+    """期交所 2026-07 中把 DailyMarketReportFut 從 JSON 改成 CSV(UTF-8+BOM、
+    中文表頭、Accept 談判無效)→ 以表頭名取欄,回傳 list[dict]。"""
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        text = r.read().decode("utf-8-sig")
+    return list(csv.DictReader(text.splitlines()))
 
 
 def fetch_final_settlement() -> Optional[Tuple[dt.date, str, float]]:
-    """最近一次「最後結算價」→ (結算日, 到期月份, 價)。取 TX(臺股期貨)那筆。"""
+    """最近一次「最後結算價」→ (結算日, 到期月份, 價)。取 TX(臺股期貨)**月契約**那筆。
+
+    ⚠ 2026-07-27 發現:API 首列開始出現週契約(如 202607W4 @ 7/22)。本 registry
+    只管月結算 —— 週契約一旦寫進 cal,「結算日」的消費端(SVWAP 錨、幻影守衛等)
+    會把週三誤當結算日 → 只認 6 位數純數字月份,其餘跳過。失敗印警告,不再無聲。
+    註:此端點**只回單一最新結算**,週契約上榜後,月契約僅在「月結算日→下個週三」
+    的 ~1 週窗口內可見 → 平常日回 None 是**正常**(update ① 會跳過,靠排程日曆),
+    月結算會在窗口內被每日排程撈到(與既有「API 偶爾失敗」同級的容錯)。
+    """
     try:
         for row in _get_json(TAIFEX_FINAL_SETTLE):
-            if "TX" in str(row.get("Contract", "")).split("/"):
-                d = dt.datetime.strptime(str(row["TheFinalSettlementDay"]), "%Y%m%d").date()
-                return d, str(row["ContractDeliveryMonth"]).strip(), float(row["TheFinalSettlementPrice"])
-    except Exception:
+            if "TX" not in str(row.get("Contract", "")).split("/"):
+                continue
+            m = str(row.get("ContractDeliveryMonth", "")).strip()
+            if not (len(m) == 6 and m.isdigit()):        # 週契約(202607W4)跳過
+                continue
+            d = dt.datetime.strptime(str(row["TheFinalSettlementDay"]), "%Y%m%d").date()
+            return d, m, float(row["TheFinalSettlementPrice"])
+    except Exception as e:
+        print(f"  ⚠️ fetch_final_settlement 失敗({e});端點格式可能又變了")
         return None
     return None
 
 
 def fetch_daily_settlements() -> Tuple[Optional[dt.date], Dict[str, float]]:
-    """最新交易日的 TX 各月份**每日結算價** → (該日, {到期月份: 結算價})。只取一般交易時段。"""
+    """最新交易日的 TX 各月份**每日結算價** → (該日, {到期月份: 結算價})。只取一般交易時段。
+
+    ⚠ 2026-07-27 修:端點已改回 CSV(舊 JSON 解析 7/16 起靜默失效、被 except 吞掉
+    → roll_event 卡「待補」)。改以中文表頭取欄;失敗改為印警告,不再無聲。
+    """
     out: Dict[str, float] = {}
     day: Optional[dt.date] = None
     try:
-        for row in _get_json(TAIFEX_DAILY_FUT):
-            if str(row.get("Contract", "")).strip() != "TX":
+        for row in _get_csv_rows(TAIFEX_DAILY_FUT):
+            if str(row.get("契約代號", "")).strip() != "TX":
                 continue
-            m = str(row.get("ContractMonth(Week)", "")).strip()
-            sp = str(row.get("SettlementPrice", "")).strip()
-            if "/" in m or sp in ("", "-", "NULL"):      # 價差組合單 / 盤後時段
+            if str(row.get("交易時段", "")).strip() != "一般":
                 continue
-            day = dt.datetime.strptime(str(row["Date"]), "%Y%m%d").date()
+            m = str(row.get("到期月份(週別)", "")).strip()
+            sp = str(row.get("結算價", "") or "").strip()
+            if "/" in m or sp in ("", "-", "NULL"):      # 價差組合單 / 無值
+                continue
+            day = dt.datetime.strptime(str(row["日期"]).strip(), "%Y%m%d").date()
             out[m] = float(sp.replace(",", ""))
-    except Exception:
+    except Exception as e:
+        print(f"  ⚠️ fetch_daily_settlements 失敗({e});端點格式可能又變了")
         return None, {}
+    if day is None:
+        print("  ⚠️ fetch_daily_settlements:0 筆有效列(表頭/格式又變了?)")
     return day, out
 
 
