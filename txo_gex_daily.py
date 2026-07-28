@@ -820,15 +820,16 @@ def _plain_map(gex, fut_front, atr=None, w=880, h=250):
 
 
 def _svg_signlog(d, days=45, w=880, h=230):
+    """回傳 (svg, 說明文字)。"""
     """B4:自營商 call/put 淨部位時間序列 —— 「符號會不會翻面」的證據鏈。"""
     p = TXO_ROOT / "institutional" / f"pc_{d.year}.parquet"
     if not p.exists():
-        return "<p class='mut'>(尚無符號日誌)</p>"
+        return "<p class='mut'>(尚無符號日誌)</p>", ""
     df = (pl.read_parquet(p).filter(pl.col("actor") == "自營商")
           .with_columns((pl.col("long_oi") - pl.col("short_oi")).alias("net"))
           .pivot(values="net", index="date", on="cp").sort("date").tail(days))
     if df.height < 3 or "C" not in df.columns or "P" not in df.columns:
-        return "<p class='mut'>(符號日誌樣本不足)</p>"
+        return "<p class='mut'>(符號日誌樣本不足)</p>", ""
     rows = df.to_dicts()
     vals = [v for r in rows for v in (r.get("C"), r.get("P")) if v is not None]
     ymin, ymax = min(vals + [0]), max(vals + [0])
@@ -849,14 +850,20 @@ def _svg_signlog(d, days=45, w=880, h=230):
         last = rows[-1].get(key)
         if last is not None:
             P.append(f'<circle cx="{X(len(rows)-1):.0f}" cy="{Y(last):.0f}" r="4" fill="{color}"/>')
+    # X 軸 = 交易日(左舊右新)。日期刻度放底部,圖例移到 SVG 外的說明列。
+    n_tick = min(6, len(rows))
+    for j in range(n_tick):
+        i = round(j * (len(rows) - 1) / max(n_tick - 1, 1))
+        anc = "start" if j == 0 else ("end" if j == n_tick - 1 else "middle")
+        P.append(f'<line x1="{X(i):.0f}" y1="{h-26:.0f}" x2="{X(i):.0f}" y2="{h-21:.0f}" stroke="#5a6470"/>'
+                 f'<text x="{X(i):.0f}" y="{h-8}" fill="#9aa3ad" font-size="13" '
+                 f'text-anchor="{anc}">{rows[i]["date"][5:]}</text>')
     neg = sum(1 for r in rows if (r.get("P") or 0) < 0)
-    P.append(f'<text x="70" y="{h-8}" fill="#26a69a" font-size="14">— CALL 淨部位</text>'
-             f'<text x="210" y="{h-8}" fill="#f5d90a" font-size="14">— PUT 淨部位</text>'
-             f'<text x="360" y="{h-8}" fill="#9aa3ad" font-size="14">正=淨買方(long gamma 側);'
-             f'近{len(rows)}日 PUT 翻負 {neg} 天</text>')
-    P.append(f'<text x="66" y="14" fill="#5a6470" font-size="12">{rows[0]["date"]}</text>'
-             f'<text x="{w-30}" y="14" fill="#5a6470" font-size="12" text-anchor="end">{rows[-1]["date"]}</text>')
-    return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(P)}</svg>'
+    note = (f'X 軸=最近 {len(rows)} 個交易日(左舊右新)· '
+            f'<span style="color:#26a69a">■ CALL 淨部位</span> '
+            f'<span style="color:#f5d90a">■ PUT 淨部位</span> · 正=淨買方 · '
+            f'期間 PUT 翻負 {neg}/{len(rows)} 天')
+    return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(P)}</svg>', note
 
 
 def _html_recon(d, n=6):
@@ -1010,7 +1017,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                         "<br>平常沒感覺;IV 噴發時 vanna 從這裡回來")
     else:
         vex_deep_v, vex_deep_sub = "N/A", ""
-    signlog_svg = _svg_signlog(d)
+    signlog_svg, signlog_note = _svg_signlog(d)
     html = f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <title>TXO GEX {d}</title><style>
 body{{margin:0;background:#0e1116;color:#e6e8eb;font-family:"Microsoft JhengHei","Noto Sans TC",sans-serif;line-height:1.8;font-size:17px}}
@@ -1071,7 +1078,7 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <h2>OI 集中價位</h2>
 <div class="panel"><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
 <h2>符號日誌(自營商淨部位走勢)</h2>
-<p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)</p>
+<p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)<br>{signlog_note}</p>
 {signlog_svg}
 {inst_html}
 <p class="mut" style="margin-top:20px">最近到期 {expiries[0]['code'] if expiries else '?'} ·
