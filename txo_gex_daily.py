@@ -584,10 +584,7 @@ def _svg_curve(profile, S, flip, flip_gp=None, w=880, h=300, only=None):
         parts.append(f'<circle cx="{X(flip_gp):.0f}" cy="{Y(0):.0f}" r="5" fill="none" stroke="#f0997b" stroke-width="2"/>')
     for k in range(int(x0 // 1000 * 1000 + 1000), int(x1), 1000):
         parts.append(f'<text x="{X(k):.0f}" y="{h-4}" fill="#5a6470" font-size="13" text-anchor="middle">{k}</text>')
-    if only is None:
-        parts.append(f'<text x="56" y="30" fill="#5e9bd0" font-size="15">GEX 美股慣例(C+/P-) — 符號依賴</text>'
-                     f'<text x="56" y="46" fill="#b3a4ff" font-size="15">毛 gamma  &#931;|&#915;|xOI — 符號無關</text>'
-                     f'<text x="56" y="62" fill="#f0997b" font-size="15">GEX+(vanna beta 修正) — 符號依賴</text>')
+    # 圖例移到 SVG 外的 HTML 說明列 —— 畫在圖內會擋住曲線。
     return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
 
 
@@ -1058,17 +1055,16 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 {plain_svg}
 <div class="panel">{plain_sent}</div>
 {pct_line}
-<h2>GEX(S) 曲線</h2>{_svg_curve(gex['profile'], S, flip, gex['flip_gp'])}
-<p class="mut">藍=GEX(美股慣例)· 橘=GEX+ · 紫=毛 gamma(&Sigma;|&Gamma;|&times;OI,不帶符號)·
-黃線 Gamma Flip · 橘圈 GEX+ Flip</p>
+<h2>GEX(S) 曲線</h2>{_svg_curve(gex['profile'], meta['fut_front'], flip, gex['flip_gp'])}
+<p class="mut">X 軸=假設的 TXF 價位,Y 軸=在該價位時的總曝險(<b>不是時間序列</b>)· <span style="color:#5e9bd0">■ GEX</span> <span style="color:#f0997b">■ GEX+</span> <span style="color:#b3a4ff">■ 毛 gamma</span> · <span style="color:#f5d90a">┃</span> Gamma Flip · <span style="color:#f0997b">○</span> GEX+ Flip · <span style="color:#9aa3ad">┋</span> 現價</p>
 <h2>逐履約價分布</h2>
 <div class="grid">
   <div class="cell"><h3>GEX 各履約價</h3>
     <p class="sub">綠=正(壓抑) 紅=負(放大)· 美股慣例</p>
-    {_svg_bars(gex['strikes_us'], S, flip, w=700, h=340, conv=1/rr)}</div>
+    {_svg_bars(gex['strikes_us'], meta['fut_front'], flip, w=700, h=340, conv=1/rr)}</div>
   <div class="cell"><h3>VEX 各履約價</h3>
     <p class="sub">vanna 曝險 · 負=去穩定 · 最深 {vex_deep_v}</p>
-    {_svg_bars(gex['vex_vn'], S, None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
+    {_svg_bars(gex['vex_vn'], meta['fut_front'], None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
 
