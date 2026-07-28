@@ -971,6 +971,26 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
         gray_v, gray_cls, gray_sub = "N/A", "mut", "缺一條 flip"
 
     # ── VEX 最深履約價 ────────────────────────────────────────────────
+    # ── 三種盤性判讀(美股慣例假設下)────────────────────────────────
+    _fp = meta.get("fut_front", 0)
+    _near = (0.15 * _atr_v) if _atr_v else 150.0
+    _top = max(gex["strikes_us"].items(), key=lambda kv: kv[1])[0] / rr if gex["strikes_us"] else None
+    if not flip:
+        play_t, play_cls, play_b = "同號組態", "mut", "曲線不變號,今日無 flip。"
+    elif abs(_fp - flip) <= _near:
+        play_t, play_cls = "臨界(貼著 flip)", "warn"
+        play_b = (f"距 flip 僅 {abs(_fp-flip):,.0f} 點。守住 {flip:,.0f} 則結構偏多,"
+                  f"跌破則<b>換劇本</b>,不是加碼理由。")
+    elif _fp > flip and gex["tot_us"] >= 0:
+        play_t, play_cls = "壓抑(區間磨)", "pos"
+        play_b = (f"造市商買低賣高,追高殺低都是逆風。區間下緣 {flip:,.0f}"
+                  + (f",上緣 {_top:,.0f}(最大正 GEX)。" if _top else "。")
+                  + "順風:區間思維、選擇權賣方。")
+    else:
+        play_t, play_cls = "放大(順勢)", "neg"
+        play_b = ("造市商追漲殺跌,跌越多越要賣。逢低接昂貴。"
+                  "順風:順勢、選擇權買方。")
+
     _vk, _vv = gex.get("vex_deep_k"), gex.get("vex_deep_v") or 0.0
     if _vk:
         _vtxf = _vk / rr
@@ -1005,10 +1025,9 @@ svg{{width:100%;height:auto;background:#0b0e13;border:1px solid #2a313c;border-r
 IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call parity {meta.get('n_expiry_parity','?')} 個到期
 (其餘退回期貨結算價曲線)| GEX+ β={gex['beta']:.1f}</p>
 <div class="panel" style="border-color:#3a4553">
-<b>讀法:只讀「位置」,不讀「正負」。</b>
-逐筆量測 39 個交易日,固定符號慣例約 <b>3/4 的日子是錯的</b>;
-牆在價格空間<b>不存在</b>(gamma 卷積寬度是履約價間距的 6–25 倍);
-逐日淨流量對隔日<b>無預測力</b>(R²=0.011)。細節見下方與 wiki 墳場 #13。
+<span class="{play_cls}" style="font-size:22px"><b>今日盤性:{play_t}</b></span>
+<span class="mut" style="font-size:14px"> — 美股慣例假設(dealer long call / short put)下的讀法</span>
+<div style="margin-top:6px;font-size:17px">{play_b}</div>
 </div>
 <div class="cards">
 <div class="card"><div class="n">TXF 近月(結算價)</div><div class="v">{meta.get('fut_front',0):,.0f}</div>
@@ -1018,7 +1037,7 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="n">避險敏感度最集中處 · 不含任何「誰持有」假設</div></div>
 
 <div class="card"><div class="n">現價 vs Gamma flip</div><div class="v warn">{dist_txt}</div>
-<div class="n">{dist_sub}<br>flip 位置對符號翻轉<b>不變</b>;上下方的壓抑/放大標籤<b>會對調</b></div></div>
+<div class="n">{dist_sub}</div></div>
 
 <div class="card"><div class="n">GEX+ Flip 與 β 敏感度</div><div class="v {beta_cls}">{gp_disp}</div>
 <div class="n">{beta_sub}</div></div>
@@ -1030,71 +1049,31 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 {plain_svg}
 <div class="panel">{plain_sent}</div>
 {pct_line}
-<p class="mut">摘要卡與本圖=<b>TXF 座標</b>(可直接對照看盤);下方柱狀圖=<b>履約價座標</b>,換算 ×{1/rr:.4f}(≈{fut_conv:+.0f} 點,由選擇權自身遠期價推得,盤中微幅漂移)。</p>
-<h2>地圖 vs 實際盤面(逐日對賬)</h2>
-<p class="mut">回填「前一日地圖說什麼 → 當日實際怎麼走」。<b>這是唯一能證明這張圖有沒有用的東西</b>,也是報表裡最該看的一段。</p>
-{recon_html}
-<h2>逐履約價分布(兩格)</h2>
+<h2>GEX(S) 曲線</h2>{_svg_curve(gex['profile'], S, flip, gex['flip_gp'])}
+<p class="mut">紫=毛 gamma(&Sigma;|&Gamma;|&times;OI,符號無關,峰值 {gross_peak_disp})· 藍=GEX 美股慣例 · 橘=GEX+ ·
+黃線 Gamma Flip · 橘圈 GEX+ Flip</p>
+<h2>逐履約價分布</h2>
 <div class="grid">
-  <div class="cell"><h3>GEX 各履約價 <span class="mut">⚠符號依賴</span></h3>
-    <p class="sub">總 {gex['tot_us']:+.1f} 億NT$/1%(美股慣例)· 位置可讀、顏色不可讀</p>
+  <div class="cell"><h3>GEX 各履約價</h3>
+    <p class="sub">綠=正(壓抑) 紅=負(放大)· 美股慣例</p>
     {_svg_bars(gex['strikes_us'], S, flip, w=700, h=340, conv=1/rr)}</div>
-  <div class="cell"><h3>VEX 各履約價 <span class="mut">最深 {vex_deep_v}</span></h3>
-    <p class="sub">總 {gex['tot_vex_vn']:+.1f} 億NT$/vol點 · vanna 曝險(非 vega)</p>
+  <div class="cell"><h3>VEX 各履約價</h3>
+    <p class="sub">vanna 曝險 · 負=去穩定 · 最深 {vex_deep_v}</p>
     {_svg_bars(gex['vex_vn'], S, None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
 </div>
-<p class="mut">兩格皆 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},今日 {conv_note};嚴格說是「gamma 主要所在到期」的座標,
-各到期換算全距 {conv_span:,.0f} 點,因 gamma 95% 集中近端故不影響看盤)。
-<b>只看 gamma 與 vanna 的理由</b>:只有會改變 delta 的 Greek 才會逼 dealer 交易期貨——
-delta 的偏導數是 gamma(價格)、vanna(IV)、charm(時間);vega/theta 只影響損益不影響 delta。
-公式已與外部專業面板逐項對驗(2026-07-09:VEX 總 −8.99 vs −9 億、Gamma Flip 差 1 點)。
-<h2>GEX(S) 曲線 <span class="mut">紫=毛 gamma(符號無關)· 藍/橘=符號依賴</span></h2>{_svg_curve(gex['profile'], S, flip, gex['flip_gp'])}
-<p class="mut">紫線是 <b>&Sigma;|&Gamma;|&times;OI</b>(gamma 對 Call/Put 皆正,不帶符號的加總即毛 gamma)——<b>不含任何「誰持有」假設</b>,
-恆正無零交叉,給的是「避險敏感度最集中的價位」而非 flip。今日峰值 <b>{gross_peak_disp}</b>(總 {gex['gross_tot']:.1f} 億NT$/1%)。
-黃線=Gamma Flip、橘圈=GEX+ Flip,兩者距離即上方的 <b>vanna 位移</b>。</p>
+<p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
+<h2>flip 線的實際結果</h2>
+<p class="mut">前一日地圖畫的 flip,隔日守住還是被穿?當天實際走了多少?</p>
+{recon_html}
 
-<h2>OI 集中價位 <span class="mut">(事實,不是支撐壓力)</span></h2>
-<div class="panel"><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div>
-
-<h2>為什麼只讀位置 <span class="mut">(三項實證,點開即懂)</span></h2>
-<div class="panel mut">
-<table style="border-collapse:collapse;font-size:15px">
-<tr><td style="padding:5px 16px 5px 0;white-space:nowrap"><b>① 符號不固定</b></td>
-    <td>逐日 (Call淨,Put淨):<b>C&minus;/P+ 43.6%</b> · C+/P&minus;(本圖採用)25.6% · C+/P+ 17.9% · C&minus;/P&minus; 12.8%。
-    <b>但 flip 的「位置」對全域符號翻轉不變</b>(C&minus;/P+ = C+/P&minus; 取負,零交叉點相同)&rarr; 位置可讀、
-    壓抑/放大的標籤約擲硬幣;同號組態(30.7% 的日子)則<b>根本沒有 flip</b>。</td></tr>
-<tr><td style="padding:5px 16px 5px 0;white-space:nowrap"><b>② 牆不存在</b></td>
-    <td>669,873 個 1 分鐘 bar / 613 日:逐日 6 次多項式對毛 gamma 曲線 <b>R&sup2;=1.0000</b>、殘差僅 0.1%
-    &rarr; 曲線就是距離的平滑函數,沒有離散結構。機制:單一履約價的 gamma 鋪開 &asymp; &sigma;&radic;T&middot;S,
-    30 天/IV20% 是 2,523 點、<b>剩 0.5 天仍有 570 點</b>,是履約價間距的 6&ndash;25 倍 &rarr; 完全重疊被抹平。
-    另:結算釘價檢定 181 到期/6,030 strike,c=&minus;0.13(t=&minus;0.32)、c&lt;0 僅 49.7%。</td></tr>
-<tr><td style="padding:5px 16px 5px 0;white-space:nowrap"><b>③ 不領先</b></td>
-    <td>逐日淨流量對<b>隔日</b>報酬:t=+0.59、R&sup2;=0.011。同期 R&sup2;=0.081 &rarr; 純描述,不預測。</td></tr>
-</table>
-<b>&rarr; 上面長條圖看得到「牆」是因為那畫的是 OI 本身;能影響價格的是 gamma 對現價的卷積,而它是平滑的。</b>
-詳見 wiki 墳場 #13。</p>
+<h2>OI 集中價位</h2>
+<div class="panel"><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
 <h2>符號日誌(自營商淨部位走勢)</h2>
 <p class="mut">整張圖的紅綠該不該翻,取決於做市商(自營商為最接近的代理)站買方還賣方。這條線是台灣獨有、美股沒有的直讀證據。</p>
 {signlog_svg}
 <div class="panel">{inst_html}</div>
-<h2>每日 SOP <span class="mut">五個數字,其餘不必看</span></h2><div class="panel">
-<table style="border-collapse:collapse;font-size:16px">
-<tr><td style="padding:4px 14px 4px 0"><b>1</b></td><td style="padding-right:14px"><b>毛 gamma 峰值</b></td>
-    <td>{gross_peak_disp}</td><td class="mut">符號無關,唯一不帶假設的讀值</td></tr>
-<tr><td style="padding:4px 14px 4px 0"><b>2</b></td><td><b>現價 vs flip</b></td>
-    <td>{dist_txt}</td><td class="mut">±150 點內=無人區,不判讀</td></tr>
-<tr><td style="padding:4px 14px 4px 0"><b>3</b></td><td><b>β 敏感度</b></td>
-    <td class="{beta_cls}">{beta_v}</td><td class="mut">超過 0.25 ATR &rarr; 今天 GEX+ 不可讀</td></tr>
-<tr><td style="padding:4px 14px 4px 0"><b>4</b></td><td><b>VEX 最深履約價</b></td>
-    <td>{vex_deep_v}</td><td class="mut">IV 噴發時 vanna 從這裡回來</td></tr>
-<tr><td style="padding:4px 14px 4px 0"><b>5</b></td><td><b>距結算</b></td>
-    <td>{f"{expiries[0]['days']:.0f}" if expiries else '?'} 天</td>
-    <td class="mut">最近到期 {expiries[0]['code'] if expiries else '?'} · 結算後地圖整個重繪</td></tr>
-</table>
-<hr style="border:0;border-top:1px solid #2a313c;margin:10px 0">
-<b class="neg">❌ 已判死,不要這樣用</b><span class="mut">:①flip 當方向濾網決定順勢/均值回歸(&lambda; 差僅 +7%、日盤零效應,扣不動 3&ndash;4 點)
-②淨流量預測隔日(R&sup2;=0.011)③牆當支撐壓力(結構不存在)。</span><br>
-<b>定位:逐 strike 歷史的累積器 + 結構事實的觀察日誌,不是交易輸入。</b></div>
+<p class="mut" style="margin-top:20px">最近到期 {expiries[0]['code'] if expiries else '?'} ·
+距結算 {f"{expiries[0]['days']:.0f}" if expiries else '?'} 天(結算後地圖重繪)</p>
 </div></body></html>"""
     rpt_dir = TXO_ROOT / "reports"
     rpt_dir.mkdir(parents=True, exist_ok=True)
