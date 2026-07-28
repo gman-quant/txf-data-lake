@@ -493,6 +493,10 @@ def store_quotes(d, series, force=False):
 def store_institutional(d, rows):
     if not rows:
         return None
+    # ⚠ 期交所在盤後尚未公布時會回「有列但全 0」→ 存進去會變成假資料。
+    #    視同無資料丟棄,隔日 backfill_institutional 會自動補回真值。
+    if not any((r.get("long_oi") or 0) or (r.get("short_oi") or 0) for r in rows):
+        return None
     out = TXO_ROOT / "institutional" / f"pc_{d.year}.parquet"
     out.parent.mkdir(parents=True, exist_ok=True)
     df = pl.DataFrame(rows)
@@ -902,14 +906,23 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                      for k, v in gex["top_pos"])
     neg = " · ".join(f"<b>{k/rr:,.0f}</b><span class='mut'>(履約{k:.0f})</span> {v:.1f}"
                      for k, v in gex["top_neg"])
-    inst_html = "<p class='mut'>三大法人分計:本日抓取失敗(不影響 GEX)。</p>"
-    if inst:
+    # ⚠ 期交所在我們抓取時尚未公布時會回全 0 → 視同無資料,不顯示假數字
+    inst_html = ""
+    if inst and any((x["long_oi"] or 0) or (x["short_oi"] or 0) for x in inst):
         r = {(x["actor"], x["cp"]): x for x in inst}
+
         def net(a, cp):
-            x = r.get((a, cp))
-            return f"{x['long_oi']-x['short_oi']:+,}" if x else "?"
-        inst_html = (f"<p>自營商淨部位:CALL {net('自營商','C')} 口、PUT {net('自營商','P')} 口 | "
-                     f"外資:CALL {net('外資','C')}、PUT {net('外資','P')}(正=淨買方)</p>")
+            for k, v in r.items():
+                if k[1] == cp and a in k[0]:
+                    return f"{v['long_oi']-v['short_oi']:+,}"
+            return None
+        parts = [f"{lab} CALL {c} · PUT {p}"
+                 for lab, c, p in (("自營商", net("自營商", "C"), net("自營商", "P")),
+                                   ("外資", net("外資", "C"), net("外資", "P")))
+                 if c and p]
+        if parts:
+            inst_html = (f"<div class='panel'>{' | '.join(parts)}"
+                         f" <span class='mut'>(正=淨買方)</span></div>")
     exp_str = " · ".join(f"{e['code']}({e['days']}d)" for e in expiries[:4])
     plain_svg, plain_sent = _plain_map(gex, meta['fut_front'], meta.get('atr'))
     flip_txf_note = ((f"履約價座標 {flip*rr:,.0f} · GEX+ flip TXF {gex['flip_gp']:,.0f}"
@@ -1000,7 +1013,6 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                         "<br>平常沒感覺;IV 噴發時 vanna 從這裡回來")
     else:
         vex_deep_v, vex_deep_sub = "N/A", ""
-    recon_html = _html_recon(d)
     signlog_svg = _svg_signlog(d)
     html = f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
 <title>TXO GEX {d}</title><style>
@@ -1033,11 +1045,8 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">TXF 近月(結算價)</div><div class="v">{meta.get('fut_front',0):,.0f}</div>
 <div class="n">TAIEX 現貨 {S:,.0f}(基差 {basis:+.0f})</div></div>
 
-<div class="card"><div class="n">毛 gamma 峰值 <b>(符號無關)</b></div><div class="v">{gross_peak_disp}</div>
-<div class="n">避險敏感度最集中處 · 不含任何「誰持有」假設</div></div>
-
-<div class="card"><div class="n">現價 vs Gamma flip</div><div class="v warn">{dist_txt}</div>
-<div class="n">{dist_sub}</div></div>
+<div class="card"><div class="n">Gamma Flip</div><div class="v warn">{f'{flip:,.0f}' if flip else 'N/A'}</div>
+<div class="n">現價 {dist_txt} · {dist_sub}</div></div>
 
 <div class="card"><div class="n">GEX+ Flip 與 β 敏感度</div><div class="v {beta_cls}">{gp_disp}</div>
 <div class="n">{beta_sub}</div></div>
@@ -1050,7 +1059,7 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="panel">{plain_sent}</div>
 {pct_line}
 <h2>GEX(S) 曲線</h2>{_svg_curve(gex['profile'], S, flip, gex['flip_gp'])}
-<p class="mut">紫=毛 gamma(&Sigma;|&Gamma;|&times;OI,符號無關,峰值 {gross_peak_disp})· 藍=GEX 美股慣例 · 橘=GEX+ ·
+<p class="mut">藍=GEX(美股慣例)· 橘=GEX+ · 紫=毛 gamma(&Sigma;|&Gamma;|&times;OI,不帶符號)·
 黃線 Gamma Flip · 橘圈 GEX+ Flip</p>
 <h2>逐履約價分布</h2>
 <div class="grid">
@@ -1062,16 +1071,13 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
     {_svg_bars(gex['vex_vn'], S, None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
-<h2>flip 線的實際結果</h2>
-<p class="mut">前一日地圖畫的 flip,隔日守住還是被穿?當天實際走了多少?</p>
-{recon_html}
 
 <h2>OI 集中價位</h2>
 <div class="panel"><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
 <h2>符號日誌(自營商淨部位走勢)</h2>
-<p class="mut">整張圖的紅綠該不該翻,取決於做市商(自營商為最接近的代理)站買方還賣方。這條線是台灣獨有、美股沒有的直讀證據。</p>
+<p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)</p>
 {signlog_svg}
-<div class="panel">{inst_html}</div>
+{inst_html}
 <p class="mut" style="margin-top:20px">最近到期 {expiries[0]['code'] if expiries else '?'} ·
 距結算 {f"{expiries[0]['days']:.0f}" if expiries else '?'} 天(結算後地圖重繪)</p>
 </div></body></html>"""
