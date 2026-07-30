@@ -8,7 +8,12 @@
 #   版本錯配 → 掉回需 AVX2 的 runtime → **Illegal instruction 當場崩潰**(2026-07-21 實際踩到)。
 #   升級一律用:uv pip install --upgrade -r requirements.txt(照宣告,extra 才會生效)
 #   三個 polars 套件(polars / polars-runtime-32 / polars-runtime-compat)版本必須一致。
-polars[rtcompat]>=1.43.0
+# ⚠️ polars 下限 1.43.1 不可退回 1.43.0:1.43.1 修了
+#   **「UB on first/last_non_null with empty chunk」**(polars #28495)。
+#   webviewer 於 2026-07-22~07-30 segfault 8 次,8 個 crash dump 全部指向
+#   `_polars_runtime_compat/_polars_runtime.pyd` 的**同一條指令**(null+0x18 解參考);
+#   本 repo 同樣大量使用 first()/last(),故一併釘住。詳見 memory `txf-webviewer-polars-segfault`。
+polars[rtcompat]>=1.43.1
 pyarrow>=25.0.0
 shioaji[speed]>=1.7.0
 confluent-kafka>=2.14.2

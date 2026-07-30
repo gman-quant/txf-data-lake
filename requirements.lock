@@ -5,9 +5,9 @@ confluent-kafka==2.15.0
 lightweight-charts==2.1
 numpy==2.4.6
 pandas==3.0.3
-polars==1.43.0
-polars-runtime-32==1.43.0
-polars-runtime-compat==1.43.0
+polars==1.43.1
+polars-runtime-32==1.43.1
+polars-runtime-compat==1.43.1
 protobuf==7.35.1
 proxy-tools==0.1.0
 pyarrow==25.0.0
