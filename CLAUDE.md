@@ -9,7 +9,14 @@ Shioaji API → `D:/txf-data` parquet 資料湖的 ETL。**本 repo 是湖內 kb
 ## 環境與執行
 
 - 一律 `.venv\Scripts\python.exe`(Python 3.13;2026-07 工作站統一到 3.13)+ 前綴 `PYTHONUTF8=1`(main_etl/view_chart/fix_kbars **沒有**自我 reconfigure stdout,cp950 會炸)。
-- 設定在 `config/settings.py`:DATA_ROOT(env 覆寫,預設 D:\txf-data)、TIMEFRAMES=[5s,1m,5m,1h,1d]、金鑰從 `.env` 載入。
+- 設定在 `config/settings.py`:DATA_ROOT(env 覆寫,預設 D:\txf-data)、TIMEFRAMES=[5s,1m,5m,**30m**,1h,1d]、金鑰從 `.env` 載入。
+  - **30m 是 2026-07-31 加的**,不是為了直接看 30m,是給 platform 當「粗 TF 的聚合底層」
+    (3seg 需要 ≤30m 粒度才切得到美股開盤那條邊界)。歷史 4807 檔**由既有 5m 回填**,
+    等價性已驗:1h 從 30m 聚 == 原生 1h(逐筆產的 ground truth)逐根相同。
+  - ⚠ 這份清單必須與 **platform 的 `PARQUET_TIMEFRAMES` 一致**(產出端 vs 消費端),
+    不一致會被 platform 的 `test_resample_base_map_exactly_covers_ui` 擋下。
+  - 六個 TF 構成一道**整除階梯**(5s→1m×12→5m×5→30m×6→1h×2→1d×24),
+    每層整除上一層 —— 這是分層聚合無損、以及任何顯示 TF 都找得到底層的前提。
 - `.env` 含 API 金鑰(從第一個 commit 起即 gitignore,**未進 git 史**)。**絕不讀取、絕不印出、絕不 commit。**
 
 ```bash
