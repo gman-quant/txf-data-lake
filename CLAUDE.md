@@ -44,7 +44,8 @@ Windows 排程任務 **"TXF Daily Sync"**(週一~五 13:50 + StartWhenAvailable)
 
 ## 紅線與現況
 
-- **repo 處於 mid-fix 狀態(2026-07-04)**:分支 `fix-etl-nontrading-date`(非 main),`core/resampler.py` 的週末守衛**未 commit**、`validate_lake.py` **untracked** —— 但生產排程已依賴兩者。**別丟棄工作樹、別不 stash 就切分支**;要 commit 只 commit 自己的檔,用戶的 dirty 檔別動。
+- ~~repo 處於 mid-fix 狀態(2026-07-04)~~ **已解除(2026-08-03 複驗)**:現在在 `main`、工作樹乾淨;週末守衛與 `validate_lake.py` 已於 `d08b51d` 一併提交進版控。`fix-etl-nontrading-date` 分支還在但未 checkout。
+  (仍然成立的通則:**要 commit 只 commit 自己改的檔,用戶的 dirty 檔別動、別 `git add -A`**。)
 - 1d 年檔寫入非原子(read-merge-overwrite);log 出現「Merge error, overwriting」= 整年檔被單日覆蓋的警訊,要深究。
 - 別在日盤收盤前(~13:45)對「今天」跑 ETL(會歸檔不完整的日盤;排程排 13:50 就是為此)。
 - 別手動測試 sync 腳本「玩玩」:step 1 是真實 Shioaji 登入 + 寫生產湖。
