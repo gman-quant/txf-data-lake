@@ -1,6 +1,18 @@
 # core/resampler.py
+#
+# 本檔只做一件事:**逐筆 tick → K 棒**(`resample_to_kbars`),供 `main_etl.py`(每日 ETL)
+# 與 `fix_kbars.py`(從 raw 重建)使用。湖裡六個 TF 各自從逐筆獨立產出,不是層層聚上去的。
+#
+# ⚠️ 這裡**刻意沒有** K棒→K棒 的 `resample_kbars`。它是 2026-07-21 那次精簡(`8301fe4`,
+#    舊看盤搬去 platform、`core/loader.py` 被刪)漏掉的殘渣 —— 唯一的呼叫端隨 loader 一起
+#    消失,函式本身留了下來,於 2026-08-03 補刪。
+#    要把細 TF 聚成粗 TF(例如加新 TF 時回填),兩條正規路徑:
+#      ① `fix_kbars.py` —— 從 raw ticks 重算,慢但與每日 ETL 同一條碼。
+#      ② 去 txf-quant-platform 跑 —— 那邊有完整的 TF 註冊表(TF_DEFS)與 3seg/週月線分支,
+#         而且讀寫的是同一個湖。
+#    **不要在這個 repo 裡重新長出一個 K棒→K棒 的函式**:2026-07-31 就是這樣壞掉的
+#    (詳見 platform wiki `Time-Semantics` ⑥)。
 import polars as pl
-from datetime import time, timedelta
 from config.calendar_rules import get_session_expression, DAY_START
 
 # Session 的 aligned 時間上限 (平移後):
@@ -176,109 +188,6 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     
     current_cols = q.collect_schema().names()
     
-    head_cols = [c for c in desired_order if c in current_cols]
-    tail_cols = [c for c in current_cols if c not in head_cols]
-    
-    q = q.select(head_cols + tail_cols)
-    
-    return q.collect()
-
-
-def resample_kbars(df: pl.DataFrame, timeframe: str) -> pl.DataFrame:
-    """
-    將低級別 K 棒 (例如 1m 或 1h) 加上動態重取樣為指定的目標週期 (例如 4h)
-    """
-    if df.is_empty():
-        return df
-
-    # 抓取 Symbol
-    symbol_val = None
-    if "symbol" in df.columns:
-        symbol_val = df["symbol"][0]
-
-    q = df.lazy()
-
-    aggs = [
-        pl.col("open").first().alias("open"),
-        pl.col("high").max().alias("high"),
-        pl.col("low").min().alias("low"),
-        pl.col("close").last().alias("close"),
-        pl.col("volume").sum().alias("volume")
-    ]
-    
-    if "underlying_close" in df.columns:
-        aggs.append(pl.col("underlying_close").last().alias("underlying_close"))
-
-    # 判斷是否為跨日週期 (例如 1w, 1mo, 2d, 5d 等)
-    is_multi_day = timeframe.endswith('w') or timeframe.endswith('mo')
-    if timeframe.endswith('d'):
-        try:
-            # 判斷大於 1 天的週期
-            if int(timeframe[:-1]) > 1:
-                is_multi_day = True
-        except ValueError:
-            pass
-
-    if is_multi_day:
-        # 跨日週期：直接依據時間進行大區間的分組，不需理會 session/date 邊界
-        # 我們將 ts 截斷至該週/月的起點作為分組依據
-        # Polars 的 group_by_dynamic 會自動處理這件事
-        q = (
-            q.sort("ts")
-            .group_by_dynamic(
-                "ts", 
-                every=timeframe, 
-                closed="left", 
-                label="left"
-            )
-            .agg(aggs)
-        )
-    else:
-        # 將時間平移，使得開盤時間對齊 00:00 (以利 dynamic group_by 對準整點起始)
-        q = q.with_columns(
-            pl.when(pl.col("session") == "Day")
-            .then(pl.col("ts").dt.offset_by("-8h45m"))
-            .otherwise(pl.col("ts").dt.offset_by("-15h"))
-            .alias("aligned_ts")
-        )
-
-        # 🔒 收盤 Snap：將稍微超出 session 收盤時間的資料點歸入最後一個合法 bucket
-        q = _snap_aligned_ts_to_session(q, timeframe)
-
-        # 動態聚合 (並使用 date, session 分組，不需再重新計算 date)
-        q = (
-            q.sort("aligned_ts")
-            .group_by_dynamic(
-                "aligned_ts", 
-                every=timeframe, 
-                closed="left", 
-                label="left",
-                group_by=["date", "session"]
-            )
-            .agg(aggs)
-        )
-
-        # 時間平移還原
-        q = q.with_columns(
-            pl.when(pl.col("session") == "Day")
-            .then(pl.col("aligned_ts").dt.offset_by("8h45m"))
-            .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
-            .alias("ts")
-        ).drop("aligned_ts")
-
-    # 補回 Symbol
-    if symbol_val is not None:
-        q = q.with_columns(pl.lit(symbol_val).alias("symbol"))
-
-    # 通用過濾與整理欄位
-    q = q.filter(pl.col("volume") > 0)
-    
-    desired_order = [
-        "symbol", "date", "ts", "session",
-        "open", "high", "low", "close", "volume", "underlying_close"
-    ]
-    
-    current_cols = q.collect_schema().names()
     head_cols = [c for c in desired_order if c in current_cols]
     tail_cols = [c for c in current_cols if c not in head_cols]
     
