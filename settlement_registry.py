@@ -201,7 +201,13 @@ def verify_against_shioaji(cal: Dict[str, dict], log) -> dict:
         api = sj.Shioaji(simulation=True)          # 模擬環境:唯讀合約主檔,不碰生產下單
         api.login(API_KEY, SECRET_KEY)
         by_contract = {v.get("contract"): k for k, v in cal.items()}
-        for c in api.Contracts.Futures.TXF:
+        # 2026-08-03:舊寫法 `api.Contracts.Futures.TXF` 會噴 DeprecationWarning
+        # (「backed by contracts v2; use api.contracts instead」)。
+        # ⚠️ v2 **不是單純改小寫**:`api.contracts.futures` 是**函式**要傳 root,
+        #   直接寫 `api.contracts.Futures.TXF` 會 AttributeError。
+        # 等價性以實際登入驗過(shioaji 1.7.0):8 個合約的
+        # (code, delivery_date, update_date) 逐項相同。
+        for c in api.contracts.futures("TXF"):
             m = str(getattr(c, "delivery_month", "") or "")
             d = str(getattr(c, "delivery_date", "") or "").replace("/", "-")
             if len(m) != 6 or not d:
