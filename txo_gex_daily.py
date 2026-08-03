@@ -116,15 +116,15 @@ def fetch_institutional(d):
 
 # ---------------- 到期/定價 ----------------
 
+# 2026-08-03:`nth_wed` 與 `nth_weekday` **在同一個檔案裡是同一個公式的兩份**
+# (`nth_wed(y,m,n) == nth_weekday(y,m,n,2)`,1990–2100 逐月驗過)。
+# 一併收斂到 `config/calendar_rules`;`nth_wed` 保留為薄包裝,呼叫端不必改。
+from config.calendar_rules import nth_weekday            # noqa: E402  (re-export)
+
+
 def nth_wed(y, m, n):
-    d1 = date(y, m, 1)
-    return date(y, m, 1 + (2 - d1.weekday()) % 7 + 7 * (n - 1))
-
-
-def nth_weekday(y, m, n, wd):
-    """該月第 n 個星期 wd(Mon=0)。"""
-    first = date(y, m, 1).weekday()
-    return date(y, m, 1 + (wd - first) % 7 + 7 * (n - 1))
+    """該月第 n 個星期三。"""
+    return nth_weekday(y, m, n, 2)
 
 
 _TRADING_DAYS = None

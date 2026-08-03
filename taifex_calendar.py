@@ -32,9 +32,9 @@ MIN_MONTHS = 10          # 少於這個數就不信(PDF 版面可能變了)
 MAX_ROLLOVER_DAYS = 20   # 結算日相對第三個週三最多順延幾天(春節 2023 實測 12 天)
 
 
-def third_wednesday(year: int, month: int) -> dt.date:
-    first = dt.date(year, month, 1)
-    return first + dt.timedelta(days=(2 - first.weekday()) % 7 + 14)
+# 2026-08-03:公式收斂到 `config/calendar_rules`(repo 內原本有四份同義實作)。
+# ⚠️ 那個模組的 polars import 已移進函式內,所以本檔仍維持零重相依。
+from config.calendar_rules import third_wednesday        # noqa: E402  (re-export)
 
 
 def _bands(vals, gap):

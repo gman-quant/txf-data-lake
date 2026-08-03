@@ -58,9 +58,9 @@ AUTHORITATIVE = {"taifex_api", "taifex_calendar"}
 
 
 # ── 基礎:第三個週三 + 假日順延 ────────────────────────────────────────────
-def third_wednesday(year: int, month: int) -> dt.date:
-    first = dt.date(year, month, 1)
-    return first + dt.timedelta(days=(2 - first.weekday()) % 7 + 14)
+# 2026-08-03:公式收斂到 `config/calendar_rules`(repo 內原本有**四份**同義實作)。
+# 此處保留 re-export,因為它是本模組的公開名稱、外部有引用。
+from config.calendar_rules import third_wednesday        # noqa: E402  (re-export)
 
 
 def next_contract(contract: str) -> str:
