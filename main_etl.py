@@ -11,7 +11,6 @@ import polars as pl
 from config.settings import DATA_ROOT, TIMEFRAMES
 from adapters.shioaji_source import ShioajiSource
 from core.resampler import resample_to_kbars
-from config.calendar_rules import DAY_START
 
 # 定義目標商品清單
 TARGET_SYMBOLS = ['TXF', 'TSE', 'TXFR2']

@@ -13,7 +13,11 @@
 #    **不要在這個 repo 裡重新長出一個 K棒→K棒 的函式**:2026-07-31 就是這樣壞掉的
 #    (詳見 platform wiki `Time-Semantics` ⑥)。
 import polars as pl
-from config.calendar_rules import get_session_expression, DAY_START
+from config.calendar_rules import get_session_expression
+# P4(2026-08-04):歸檔日期樞紐改吃**專屬名字**,不再借用 `DAY_START`。
+# ⚠️ **這一支才是每天真的寫湖 `date` 欄的那個** —— platform 那份孿生是 viewer/回測用。
+#    第一輪 P3 只遷了 platform 那份,漏了這裡(2026-08-04 稽核抓到)。
+from config.session_model import ARCHIVE_DATE_PIVOT
 
 # Session 的 aligned 時間上限 (平移後):
 #   日盤: 08:45 ~ 13:45 → aligned 後為 00:00 ~ 05:00:00，上限 = 5 * 3600 秒
@@ -100,7 +104,7 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     q = tick_df.lazy().sort("ts").with_columns([
         get_session_expression("ts"),
         
-        pl.when(pl.col("ts").dt.time() < DAY_START) # 只要是早上8點前
+        pl.when(pl.col("ts").dt.time() < ARCHIVE_DATE_PIVOT)   # 樞紐前 → 退一天
           .then(pl.col("ts").dt.offset_by("-1d"))  # 日期退一天
           .otherwise(pl.col("ts"))                 # 其他維持原樣
           .dt.date()                               # 取出日期部分
