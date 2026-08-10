@@ -1101,6 +1101,62 @@ def log_event(rec):
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 
+# ── 健康狀態(2026-08-10)──────────────────────────────────────────────
+# 為什麼要:這支是**獨立排程**(14:25),不在 daily_sync 九步裡。原本失敗只會安靜
+# 寫進 fetch_log.jsonl,而**沒有任何人去讀它** —— 端點改版 / 格式變會無聲缺資料。
+# 同一類根因:2026-07-22 TSE001→IX0001 整天沒抓到,缺的不是資訊,是「知道該去看」。
+# 這個檔由 daily_sync 讀取並折進 logs/sync_state.json,掛上既有的健康面。
+GEX_STATE_PATH = TXO_ROOT / "logs" / "state.json"
+
+
+def _lake_has_trading_day(d):
+    """那天湖裡有沒有 TXF 5m —— 用來分辨「拿不到 = 端點壞了」與「拿不到 = 休市」。
+
+    daily_sync 13:50 就跑完了,所以本支 14:25 起輪詢時,**交易日的檔案必然已存在**;
+    國定假日/颱風假則因 main_etl 的幻影守衛而不會有檔。這是現成、零成本的休市判別,
+    不必再維護一份 TAIFEX 日曆(與 data-ops「假日免維護」同一個機制)。
+    """
+    p = DATA_ROOT / "kbars" / "5m" / "TXF" / str(d.year) / f"{d}_TXF_5m.parquet"
+    return p.exists()
+
+
+def write_gex_state(d, ok, attempts, mode="wait"):
+    """把最後一次結果寫成機器可讀的健康狀態(daily_sync 隔日 13:50 讀它)。
+
+    `consecutive_failures` **只在「湖有那天、GEX 卻拿不到」時累加** —— 休市日走到
+    deadline giveup 是設計行為,不算失敗。否則春節會連噴好幾天「狼來了」,
+    而狼來了正是 B3 分級 SUMMARY 要解決的問題,別把它重新種回來。
+
+    整個函式包在 try 裡:**監控寫不進去絕不能弄壞資料管線**。
+    """
+    st = {}
+    try:
+        if GEX_STATE_PATH.exists():
+            st = json.loads(GEX_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        st = {}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    trading = _lake_has_trading_day(d)
+    st.update({"last_run": now, "last_date": str(d), "last_ok": bool(ok),
+               "last_attempts": attempts, "last_mode": mode,
+               "lake_has_trading_day": trading, "note": ""})
+    if ok:
+        st["last_ok_date"] = str(d)
+        st["last_ok_ts"] = now
+        st["consecutive_failures"] = 0
+    elif trading:
+        st["consecutive_failures"] = int(st.get("consecutive_failures", 0)) + 1
+    else:
+        st["note"] = "giveup_non_trading_day"      # 不累加 —— 休市不是故障
+    try:
+        GEX_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        GEX_STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2),
+                                  encoding="utf-8")
+    except Exception as ex:
+        print(f"[GEX-STATE] 寫入失敗(不影響資料):{ex!r}")
+    return st
+
+
 def backfill_institutional(d, days=7):
     """回補最近 days 個「已有 quotes 卻缺三大法人」的交易日(法人資料晚出時的補救)。"""
     p = TXO_ROOT / "institutional" / f"pc_{d.year}.parquet"
@@ -1129,6 +1185,7 @@ def run_with_wait(d, deadline_hhmm="16:30", poll_sec=180, force=False):
         if run_one(d, force=force):
             print(f"[WAIT] 第 {attempt} 次嘗試取得資料")
             log_event({"date": str(d), "attempt": attempt, "ok": True, "mode": "wait"})
+            write_gex_state(d, True, attempt)
             verify_previous(d)
             backfill_institutional(d)
             return True
@@ -1136,6 +1193,7 @@ def run_with_wait(d, deadline_hhmm="16:30", poll_sec=180, force=False):
             print(f"[WAIT-GIVEUP] {d} 至 {deadline_hhmm} 仍無資料(假日或延遲),共嘗試 {attempt} 次")
             log_event({"date": str(d), "attempt": attempt, "ok": False, "mode": "wait",
                        "note": "deadline"})
+            write_gex_state(d, False, attempt)
             return False
         print(f"[WAIT] 第 {attempt} 次無資料,{poll_sec}s 後重試(截止 {deadline_hhmm})")
         time.sleep(poll_sec)
@@ -1265,6 +1323,10 @@ def main():
             run_with_wait(d, a.wait_until, a.poll_sec, force=a.force)
         elif run_one(d, force=a.force, report_only=a.report_only):
             log_event({"date": str(d), "attempt": 1, "ok": True, "mode": "manual"})
+            if not a.report_only:
+                # 手動補跑要能**解除警報**,否則 consecutive_failures 會卡在高點誤報。
+                # report-only 只重出圖、沒抓資料,不該假裝那天補好了。
+                write_gex_state(d, True, 1, mode="manual")
             verify_previous(d)
             backfill_institutional(d)
 
