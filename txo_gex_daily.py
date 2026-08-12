@@ -462,12 +462,48 @@ def compute_gex(series, S, beta=1.0):
     # ── VEX 最深履約價(vanna 去穩定最集中處)────────────────────────
     vex_deep = min(vex_vn.items(), key=lambda kv: kv[1]) if vex_vn else (None, 0.0)
 
+    # ── IV 期限結構(完全不依賴符號慣例 —— 純粹是定價)────────────────
+    #   逐到期 ATM IV / OI / 剩餘天數,再由相鄰到期的變異數差反推
+    #   「那一段時間」的遠期 IV 與隱含區間移動 √(σ₂²T₂ − σ₁²T₁)。
+    by_exp = {}
+    for s in series:
+        by_exp.setdefault(s["exp_code"], []).append(s)
+    ts_rows = []
+    for e, ss in by_exp.items():
+        Td = ss[0]["Td"]
+        if Td <= 0:
+            continue
+        near = sorted(ss, key=lambda x: abs(x["K"] - S))[:4]
+        ivs = [x["iv"] for x in near if x.get("iv") and x["iv"] > 0]
+        if not ivs:
+            continue
+        ts_rows.append({"code": e, "date": str(ss[0].get("exp_date", ""))[:10],
+                        "Td": Td, "iv": sum(ivs) / len(ivs),
+                        "oi": sum(x["oi"] for x in ss)})
+    ts_rows.sort(key=lambda r: r["Td"])
+    for a, b in zip(ts_rows, ts_rows[1:]):
+        T1, T2 = a["Td"] / 365.0, b["Td"] / 365.0
+        v = b["iv"] ** 2 * T2 - a["iv"] ** 2 * T1
+        b["fwd_iv"] = math.sqrt(v / (T2 - T1)) if (v > 0 and T2 > T1) else None
+        b["imp_move"] = math.sqrt(v) * 100 if v > 0 else None
+    # 地圖適用一個交易日 → 用近月 ATM IV 換算「一日隱含移動」
+    front_iv = ts_rows[0]["iv"] if ts_rows else None
+    day_move = front_iv * math.sqrt(1 / 252.0) * 100 if front_iv else None
+
+    # ── 集中度(sign-free:用 |GEX| 佔比,不受符號慣例影響)──────────
+    absg = {k: abs(v) for k, v in gex_us.items()}
+    gsum = sum(absg.values()) or 1.0
+    conc = sorted(absg.items(), key=lambda kv: -kv[1])[:3]
+    conc = [(k, v, v / gsum) for k, v in conc]
+
     return {"strikes_us": gex_us, "strikes_tw": gex_tw, "vex_us": vex_us, "vex_tw": vex_tw,
             "gp_us": gp_us, "vex_sh": vex_sh, "tot_vex_sh": sum(vex_sh.values()),
             "vex_vn": vex_vn, "tot_vex_vn": sum(vex_vn.values()),
             "gross_peak": gross_peak, "gross_tot": gross_tot,
             "beta_scan": beta_scan, "beta_span": beta_span,
             "vex_deep_k": vex_deep[0], "vex_deep_v": vex_deep[1],
+            "term": ts_rows, "front_iv": front_iv, "day_move": day_move,
+            "conc": conc,
             "profile": prof, "flip_us": zero_cross(1), "flip_gp": zero_cross(3),
             "ratio_eff": (rsum / wsum) if wsum else 1.0,
             "ratio_range": (min((x.get("ratio", 1.0) for x in series), default=1.0),
@@ -988,6 +1024,47 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
         gray_v, gray_cls, gray_sub = "N/A", "mut", "缺一條 flip"
 
     # ── VEX 最深履約價 ────────────────────────────────────────────────
+    # ── ⛔ 可讀性判決:一日隱含移動 vs 現價到 flip 的距離 ──────────────
+    #   地圖只適用一個交易日。若市場替「一天」定的價就蓋過整段地形,
+    #   今天的結構讀數不穩(外部專業者在 $TGT 案例用的是同一個比較)。
+    _dm = gex.get("day_move")
+    _terr = (abs(meta.get("fut_front", 0) - flip) / meta["fut_front"] * 100) if flip else None
+    # ⚠ 不用「一日移動 > 地形 ⇒ 不可讀」的二元判決:實測 22 天有 21 天成立(95%),零鑑別力。
+    #   改報「flip 在幾個一日隱含波動之外」—— 實測 0.05–1.07 天(20 倍差距),這才有資訊。
+    #   🔴 而且它本身是一個結構性發現:TXO 的 flip 幾乎永遠在一天的隱含波動之內。
+    if _dm is None or _terr is None or _dm <= 0:
+        read_v, read_cls, read_sub = "N/A", "mut", "缺 flip 或近月 IV"
+    else:
+        _days = _terr / _dm
+        read_v = f"{_days:.2f} 日"
+        read_cls = "neg" if _days < 0.15 else ("warn" if _days < 0.6 else "pos")
+        read_sub = (("⛔ flip 幾乎就在腳下,體制標籤無意義" if _days < 0.15 else
+                     "⚠️ flip 在一日波動之內,體制隨時可翻" if _days < 0.6 else
+                     "✅ flip 相對遠,今日體制讀數較穩") +
+                    f"<br>近月 ATM IV {gex.get('front_iv',0):.1%} &rarr; 一日 &plusmn;{_dm:.2f}%"
+                    f" · 現價到 flip {_terr:.2f}%")
+
+    # ── 期限結構表 ───────────────────────────────────────────────────
+    _tr = gex.get("term") or []
+    if _tr:
+        _rows = "".join(
+            f"<tr><td>{r['code']}</td><td>{r['date']}</td><td style='text-align:right'>{r['Td']:.0f}</td>"
+            f"<td style='text-align:right'><b>{r['iv']:.1%}</b></td>"
+            f"<td style='text-align:right'>{r['oi']:,}</td>"
+            f"<td style='text-align:right'>{(f'{r[chr(102)+chr(119)+chr(100)+chr(95)+chr(105)+chr(118)]:.1%}' if r.get('fwd_iv') else '—')}</td>"
+            f"<td style='text-align:right'>{(f'&plusmn;{r[chr(105)+chr(109)+chr(112)+chr(95)+chr(109)+chr(111)+chr(118)+chr(101)]:.2f}%' if r.get('imp_move') else '—')}</td></tr>"
+            for r in _tr)
+        term_html = (
+            "<table><tr><th>到期</th><th>日期</th><th>剩餘</th><th>ATM IV</th><th>OI</th>"
+            "<th>遠期 IV</th><th>區間隱含移動</th></tr>" + _rows + "</table>")
+    else:
+        term_html = "<p class='mut'>(期限結構資料不足)</p>"
+
+    # ── 集中度(sign-free)───────────────────────────────────────────
+    _c = gex.get("conc") or []
+    conc_html = " · ".join(
+        f"<b>{k/rr:,.0f}</b><span class='mut'>(履約{k:.0f})</span> {p:.0%}" for k, v, p in _c)
+
     # ── 三種盤性判讀(美股慣例假設下)────────────────────────────────
     _fp = meta.get("fut_front", 0)
     _near = (0.15 * _atr_v) if _atr_v else 150.0
@@ -1057,6 +1134,9 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 
 <div class="card"><div class="n">VEX 最深履約價</div><div class="v">{vex_deep_v}</div>
 <div class="n">{vex_deep_sub}</div></div>
+
+<div class="card"><div class="n">flip 距離(以一日隱含波動為尺)</div>
+<div class="v {read_cls}">{read_v}</div><div class="n">{read_sub}</div></div>
 </div>
 <h2>結構地圖</h2>
 {plain_svg}
@@ -1075,8 +1155,15 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
 
+<h2>IV 期限結構</h2>
+<p class="mut">逐到期價平 IV。<b>不依賴符號慣例</b> —— 純粹是定價。
+「遠期 IV / 區間隱含移動」由相鄰到期的變異數差反推 &radic;(&sigma;₂²T₂ &minus; &sigma;₁²T₁),
+即市場替<b>那一段時間</b>單獨定的價。曲線平 = 市場不預期特別的事;近端單獨墊高 = 有事件被標價。</p>
+{term_html}
+
 <h2>OI 集中價位</h2>
-<div class="panel"><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
+<div class="panel">最集中三檔(以 |GEX| 佔全場比重,<span class="mut">不依賴符號</span>):{conc_html}
+<br><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
 <h2>符號日誌(自營商淨部位走勢)</h2>
 <p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)<br>{signlog_note}</p>
 {signlog_svg}
