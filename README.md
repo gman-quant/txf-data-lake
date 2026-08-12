@@ -17,7 +17,7 @@
 | | |
 |---|---|
 | **商品** | `TXF`(近月)、`TXFR2`(次月)、`TSE`(加權指數) |
-| **K 棒週期** | `5s` `1m` `5m` `1h` `1d` |
+| **K 棒週期** | `5s` `1m` `5m` `30m` `1h` `1d` |
 | **資料起點** | 2020-02-25 |
 | **輸出** | Parquet,預設在 `D:\txf-data`(可用 `DATA_ROOT` 覆寫) |
 
@@ -58,10 +58,12 @@ SHIOAJI_SECRET_KEY=你的SecretKey
 ```text
 D:\txf-data\
 ├── raw_ticks\                       原始 tick(以月為單位)
-├── kbars\<tf>\<symbol>\<year>\      K 棒 Parquet(tf = 5s/1m/5m/1h/1d)
+├── kbars\<tf>\<symbol>\<year>\      K 棒 Parquet(tf = 5s/1m/5m/30m/1h/1d)
 ├── adjustments\                     結算日曆 settlement_calendar.csv 等
+├── spread\                          跨月價差事件層(由 gale 產出,見下方每日排程 ⑦)
+├── md_raw\                          Quote 原始流(由 gale 產出,見下方每日排程 ⑧)
 ├── external\                        外部資料(如 Yahoo ^TWII 長期歷史)
-└── txo\                             選擇權相關
+└── txo\                             選擇權 / dealer GEX(由「TXO GEX Daily」排程產出)
 ```
 
 > `1d` 每個交易日有**兩根**(日盤 08:45 / 夜盤 15:00)是正常設計,不是重複資料。
@@ -110,12 +112,24 @@ python batch_run.py
 ## 4. 自動化(每日排程)
 
 **排程不是由本專案管的。** workspace 根目錄的 `daily_sync.py` 是唯一的編排器,
-由 Windows 工作排程「TXF Daily Sync」每個工作日 **13:50** 呼叫:
+由 Windows 工作排程「TXF Daily Sync」每個工作日 **13:50** 呼叫。
+**完整部署圖(機器拓撲 / 埠 / 三支排程)見 [workspace 根的 README](../README.md)。**
 
-```
-就緒輪詢(ping)→ 掃描缺哪幾天 → 逐日執行:
-    main_etl.py → validate_lake.py → (gale) 匯出 bidask → 匯出 HTML
-```
+### 九步 —— 其中只有三步是本專案的
+
+| # | 步驟 | repo | 做什麼 |
+|---|---|---|---|
+| ① | `time_const` | platform | 盤段模型四份副本的 SHA256 + 黃金向量比對 |
+| ② | **`ETL`** | **data-lake** | `main_etl` —— Shioaji 歷史 API → Parquet |
+| ③ | **`validate`** | **data-lake** | `validate_lake` —— 當日資料體檢 |
+| ④ | `bidask` | gale | Kafka 五檔 → Parquet(補不回來的那份) |
+| ⑤ | `html` | gale | 當日 HTML 快照 |
+| ⑥ | **`settlement`** | **data-lake** | `settlement_registry` —— 結算日曆自我校正 |
+| ⑦ | `spread` | gale | 跨月價差事件層 → `D:\txf-data\spread\` |
+| ⑧ | `md_raw` | gale | Kafka JSON → `D:\txf-data\md_raw\`(Kafka 只留 30 天) |
+| ⑨ | `backup` | workspace | `D:\txf-data` → Ubuntu 增量備份 |
+
+**①③ 是完整性閘**:任一紅燈 ⇒ 跳過 ⑨ backup(不備份一個可疑的狀態)。
 
 ```bash
 python daily_sync.py            # 補所有缺的交易日(排程跑這個)
@@ -126,7 +140,30 @@ python daily_sync.py --dry-run  # 只看缺哪幾天,不執行(零風險)
 缺口掃描是 **per-symbol** 的:某天只有部分商品成功,隔天會自動只補沒補到的那個。
 假日不必特別處理 —— `main_etl.py` 的幻影資料守衛會自己跳過。
 
-日誌:`logs/catchup-<日期>.log`;各步驟狀態:`logs/sync_state.json`。
+日誌:`logs/catchup-<日期>.log`;各步驟狀態:**workspace 根**的 `logs/sync_state.json`
+(**不是** `D:\txf-data\logs\`)。
+
+### 另一支排程:TXO GEX Daily
+
+**這支是本專案的,而且獨立於上面九步之外。** Windows 工作排程「TXO GEX Daily」
+每個工作日 **14:25** 跑:
+
+```bash
+python txo_gex_daily.py --wait            # 排程跑這個(輪詢等 TAIFEX 公布)
+python txo_gex_daily.py --date 2026-07-21 # 補單日
+python txo_gex_daily.py --backfill 2026-06-01 2026-07-21
+```
+
+抓 TAIFEX 公開 CSV → `D:\txf-data\txo\` parquet → 算 dealer GEX(兩版符號並列)
+→ 產 HTML 儀表板。冪等(已存在即跳過,`--force` 覆寫)、不碰 Shioaji / `.env`。
+
+- `--wait` 是**輪詢等待公布**(實測 14:37–14:52 拿到,拿到就收工)。
+  🔒 「它 14:40 才完成 ⇒ 把啟動改到 14:40」是錯的:完成時刻由 TAIFEX 決定,
+  與啟動時間無關;改晚只會讓早出的日子變慢。
+- 它把健康狀態寫進 `D:\txf-data\txo\logs\state.json`,由 `daily_sync` **唯讀**
+  折進 `logs/sync_state.json` 的 `txo_gex` 欄(連續失敗 ≥2 才吵;休市 giveup 不算失敗)。
+  **在此之前它失敗是完全無聲的。**
+- ⚠️ 這支排程的定義**還沒進版控**(`infra/` 只有 Daily Sync 那支)—— 機器掛掉要憑記憶重建。
 
 ---
 
