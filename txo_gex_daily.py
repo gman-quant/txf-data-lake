@@ -479,6 +479,7 @@ def compute_gex(series, S, beta=1.0):
             continue
         ts_rows.append({"code": e, "date": str(ss[0].get("exp_date", ""))[:10],
                         "Td": Td, "iv": sum(ivs) / len(ivs),
+                        "fwd": ss[0].get("fwd"),
                         "oi": sum(x["oi"] for x in ss)})
     ts_rows.sort(key=lambda r: r["Td"])
     for a, b in zip(ts_rows, ts_rows[1:]):
@@ -489,6 +490,26 @@ def compute_gex(series, S, beta=1.0):
     # 地圖適用一個交易日 → 用近月 ATM IV 換算「一日隱含移動」
     front_iv = ts_rows[0]["iv"] if ts_rows else None
     day_move = front_iv * math.sqrt(1 / 252.0) * 100 if front_iv else None
+
+    # ── 結算區間預估(唯一通過對照組檢驗的結算工具)──────────────────
+    #   用近月的 parity 遠期價 + ATM IV 換算 σ 區間。
+    #   實測校準(2024-01~2026-08,173 個剩 1 日的週選觀測,結算價=TSE 09:00–09:14 均值):
+    #     ±0.5σ 43.4% · ±0.8σ 67.1% · ±1.0σ 81.5%  ← 理論值 38.3/57.6/68.3
+    #     ⇒ 選擇權替結算定的區間**偏寬**,想要 ~68% 把握用 0.8σ 就夠。
+    #   ⚠ 固定點數會失效:同一個「±200 點」2025 上半年命中 76.8%、2025-07 後掉到 42.3%
+    #     (1σ 中位由 244 → 341 點)。**用 σ,不要用點數。**
+    #   ⚠ 結算價以**現貨指數**計算 → 這個區間是指數點位,不是 TXF 點位。
+    CAL = {1: (43.4, 67.1, 81.5), 3: (41.5, None, 79.2), 5: (40.0, None, 75.0)}
+    settle = None
+    if ts_rows and ts_rows[0].get("fwd"):
+        f0, iv0, td0 = ts_rows[0]["fwd"], ts_rows[0]["iv"], ts_rows[0]["Td"]
+        sg = iv0 * math.sqrt(td0 / 365.0) * f0
+        k = min(CAL, key=lambda x: abs(x - td0))
+        settle = {"code": ts_rows[0]["code"], "date": ts_rows[0]["date"], "Td": td0,
+                  "fwd": f0, "iv": iv0, "sigma": sg,
+                  "cal_key": k, "cal_far": (td0 > 6),
+                  "b08": (f0 - 0.8 * sg, f0 + 0.8 * sg, CAL[k][1]),
+                  "b10": (f0 - sg, f0 + sg, CAL[k][2])}
 
     # ── 集中度(sign-free:用 |GEX| 佔比,不受符號慣例影響)──────────
     absg = {k: abs(v) for k, v in gex_us.items()}
@@ -503,7 +524,7 @@ def compute_gex(series, S, beta=1.0):
             "beta_scan": beta_scan, "beta_span": beta_span,
             "vex_deep_k": vex_deep[0], "vex_deep_v": vex_deep[1],
             "term": ts_rows, "front_iv": front_iv, "day_move": day_move,
-            "conc": conc,
+            "conc": conc, "settle": settle,
             "profile": prof, "flip_us": zero_cross(1), "flip_gp": zero_cross(3),
             "ratio_eff": (rsum / wsum) if wsum else 1.0,
             "ratio_range": (min((x.get("ratio", 1.0) for x in series), default=1.0),
@@ -1044,6 +1065,27 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                     f"<br>近月 ATM IV {gex.get('front_iv',0):.1%} &rarr; 一日 &plusmn;{_dm:.2f}%"
                     f" · 現價到 flip {_terr:.2f}%")
 
+    # ── 結算區間 ─────────────────────────────────────────────────────
+    _st = gex.get("settle")
+    if _st:
+        def _band(b, lab):
+            lo, hi, hit = b
+            h = f"歷史命中 <b>{hit:.0f}%</b>" if hit else "<span class='mut'>此天期未校準</span>"
+            return (f"<tr><td>{lab}</td><td style='text-align:right'><b>{lo:,.0f} – {hi:,.0f}</b></td>"
+                    f"<td style='text-align:right'>&plusmn;{(hi-lo)/2:,.0f} 點</td><td>{h}</td></tr>")
+        settle_html = (
+            f"<div class='panel'><b>{_st['code']}</b> · {_st['date']} 結算 · 剩 {_st['Td']:.0f} 日"
+            f" · parity 遠期價 <b>{_st['fwd']:,.0f}</b> · ATM IV {_st['iv']:.1%}"
+            f" · 1&sigma; = {_st['sigma']:,.0f} 點"
+            "<table style='margin-top:8px'><tr><th>區間</th><th>指數點位</th><th>寬度</th><th>校準</th></tr>"
+            + _band(_st["b08"], "&plusmn;0.8&sigma;") + _band(_st["b10"], "&plusmn;1.0&sigma;")
+            + "</table>"
+            + ("<p class='mut' style='margin:6px 0 0'>⚠️ 此天期未經校準(僅驗過剩 1/3/5 日),"
+               "命中率僅供參考。</p>" if _st["cal_far"] else "")
+            + "</div>")
+    else:
+        settle_html = "<p class='mut'>(近月遠期價或 IV 不足,無法估區間)</p>"
+
     # ── 期限結構表 ───────────────────────────────────────────────────
     _tr = gex.get("term") or []
     if _tr:
@@ -1154,6 +1196,16 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
     {_svg_bars(gex['vex_vn'], meta['fut_front'], None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
+
+<h2>結算區間預估</h2>
+<p class="mut">用近月的 <b>parity 遠期價 + ATM IV</b> 換算。⚠️ 結算價以<b>現貨指數</b>計算,
+故此區間是<b>指數點位</b>,不是 TXF 點位。<br>
+校準:2024-01~2026-08 共 173 個「剩 1 日」的週選觀測(結算價=TSE 09:00–09:14 均值)——
+±0.5&sigma; 43.4% · <b>±0.8&sigma; 67.1%</b> · <b>±1.0&sigma; 81.5%</b>(常態理論 38.3 / 57.6 / 68.3)。
+<b>選擇權替結算定的區間偏寬</b>,要 ~68% 把握用 0.8&sigma; 就夠。<br>
+⚠️ <b>不要用固定點數</b>:同一個「±200 點」在 2025 上半年命中 76.8%、2025-07 之後掉到 42.3%
+(1&sigma; 中位由 244 → 341 點)。波動水位會變,點數不是穩定單位。</p>
+{settle_html}
 
 <h2>IV 期限結構</h2>
 <p class="mut">逐到期價平 IV。<b>不依賴符號慣例</b> —— 純粹是定價。
