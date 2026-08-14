@@ -14,13 +14,14 @@
 資料未公布時安靜跳過(仿 main_etl 幻影守衛精神)、不碰 Shioaji / .env。
 符號問題未實證:報告永遠並列「美股慣例」與「台灣證據版」兩條線。
 """
-import sys, io, csv, json, math, time, argparse, urllib.request, urllib.parse
+import sys, io, csv, json, math, time, glob, argparse, urllib.request, urllib.parse
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")  # 排程/非TTY 下防 cp950
 
+import numpy as np
 import polars as pl
 
 DATA_ROOT = Path(r"D:\txf-data")
@@ -689,7 +690,11 @@ def store_summary(d, meta, gex):
            "wall_lo": wall[0] if wall else None, "wall_hi": wall[1] if wall else None,
            "wall_val": wall[2] if wall else None,
            "mine_lo": mine[0] if mine else None, "mine_hi": mine[1] if mine else None,
-           "mine_val": mine[2] if mine else None}
+           "mine_val": mine[2] if mine else None,
+           # 風險尺度(2026-08-13 加):近月 ATM IV 與換算出的一日 1σ 點數。
+           # 這兩欄讓「今天的 IV 在歷史什麼位置」可以零成本查。
+           "front_iv": gex.get("front_iv"), "day_move_pts": (
+               gex.get("day_move") / 100 * meta["fut_front"] if gex.get("day_move") else None)}
     p = TXO_ROOT / "daily_summary.parquet"
     df = pl.DataFrame([row])
     if p.exists():
@@ -882,6 +887,61 @@ def _plain_map(gex, fut_front, atr=None, w=880, h=250):
         stance = "今天沒有翻轉線(整條曲線同號):全域偏單一體制"
     sent = f"{stance}。今日力量{lvl}" + ("——就算有牆有地雷,威力也都是縮小版,別過度解讀。" if lvl == "弱" else "。")
     return svg, sent
+
+
+def _scale_panel(gex, meta):
+    """今日尺度:把 IV 換成「各視窗的 1σ 移動」與「小台/大台的金額」。
+    這是報表裡唯一四題全過的東西(改變決策 / 贏對照組 / 獨立 / 適用):
+      · 部位規模:一天的正常波動值多少錢
+      · 停損寬度:停在噪音帶之內就是純洗
+      · 目標可行性:超出區間的目標機率很低
+    ⚠ 用 IV 而非 ATR:實測與實際位移的相關 IV 0.714 > 20 日歷史波動 0.604 > 5 日 0.556。
+    """
+    iv = gex.get("front_iv")
+    F = meta.get("fut_front") or 0
+    if not (iv and iv > 0 and F):
+        return "<p class='mut'>(近月 IV 不足,無法估尺度)</p>", None
+    # IV 的歷史百分位(用 daily_summary 累積的 front_iv,零成本)
+    pct = hv = None
+    try:
+        s = pl.read_parquet(TXO_ROOT / "daily_summary.parquet")
+        if "front_iv" in s.columns:
+            h = s.filter(pl.col("front_iv").is_not_null())["front_iv"].to_numpy()
+            if len(h) >= 30:
+                pct = float((h < iv).mean() * 100)
+    except Exception:
+        pass
+    try:
+        tse = (pl.read_parquet(sorted(glob.glob(str(DATA_ROOT / "kbars" / "1d" / "TSE" / "*.parquet"))))
+               .filter(pl.col("session") == "Day").select(["date", "close"])
+               .unique(subset=["date"]).sort("date").tail(21))
+        c = tse["close"].to_numpy()
+        if len(c) >= 21:
+            r = np.diff(np.log(c))
+            hv = float(r.std() * math.sqrt(252))
+    except Exception:
+        pass
+    WIN = [("1 小時", 1 / (252 * 5.0)), ("1 交易日", 1 / 252.0), ("1 週(5 日)", 5 / 252.0)]
+    rows = ""
+    for lab, T in WIN:
+        pts = iv * math.sqrt(T) * F
+        rows += (f"<tr><td>{lab}</td><td style='text-align:right'><b>&plusmn;{pts:,.0f} 點</b></td>"
+                 f"<td style='text-align:right'>{pts*50:,.0f}</td>"
+                 f"<td style='text-align:right'>{pts*200:,.0f}</td></tr>")
+    vrp = (iv - hv) if hv else None
+    head = (f"近月 ATM IV <b>{iv:.1%}</b>"
+            + (f" · 歷史第 <b>{pct:.0f}</b> 百分位" if pct is not None else "")
+            + (f" · 近 20 日已實現 {hv:.1%} · <b>差 {vrp:+.1%}</b>" if hv else ""))
+    tbl = ("<table><tr><th>視窗</th><th>1&sigma; 移動</th><th>小台 1 口(元)</th>"
+           "<th>大台 1 口(元)</th></tr>" + rows + "</table>")
+    note = ""
+    if vrp is not None:
+        note = ("<p class='mut' style='margin:6px 0 0'>⚠️ 這是 <b>IV &minus; 近 20 日已實現</b>,"
+                "<b>不是 VRP</b> —— 真正的 VRP 要跟<b>未來</b>已實現比,今天無從得知。"
+                + ("目前隱含<b>高於</b>近期已實現" if vrp > 0 else "目前隱含<b>低於</b>近期已實現")
+                + ";僅供對照。歷史 VRP(變異數交換率 vs 同視窗已實現,2,236 觀測):"
+                "中位 <b>+3.16 vol 點</b>、>0 佔 <b>67.5%</b>。</p>")
+    return f"<div class='panel'>{head}{tbl}{note}</div>", iv
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
@@ -1120,6 +1180,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                     f" · 現價到 flip {_terr:.2f}%")
 
     # ── 結算區間 ─────────────────────────────────────────────────────
+    scale_html, _ = _scale_panel(gex, meta)
     _sts = gex.get("settles") or []
     settle_svg = _svg_settle_bands(_sts, meta.get("fut_front", 0))
     settle_html = ""
@@ -1232,7 +1293,13 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">flip 距離(以一日隱含波動為尺)</div>
 <div class="v {read_cls}">{read_v}</div><div class="n">{read_sub}</div></div>
 </div>
-<h2>📍 結算價會落在哪 <span class="mut">(最近三個到期)</span></h2>
+<h2>① 今日尺度 <span class="mut">— 部位規模 / 停損寬度 / 目標可行性</span></h2>
+<p class="mut">用近月 IV 換算各視窗的 1&sigma; 移動。<b>選這個尺而不是 ATR</b>:實測與實際位移的相關
+IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
+<b>停損若設在 1&sigma; 之內,等於停在噪音帶裡</b>;目標若設在區間之外,達成機率很低。</p>
+{scale_html}
+
+<h2>② 結算價會落在哪 <span class="mut">(最近三個到期)</span></h2>
 <p class="mut">深色帶 = <b>±0.8&sigma;,約 67% 的結算落在裡面</b>;淺色帶 = ±1.0&sigma;,約 82%。
 黃線 = 中心(選擇權推算的遠期價)。<br>
 校準自 2024-01~2026-08 共 173 個「剩 1 日」的週選實測(剩 3 日 79%、剩 5 日 75%)。
@@ -1241,13 +1308,13 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 {settle_svg}
 {settle_html}
 
-<h2>結構地圖</h2>
+<h2>③ 結構觀察 <span class="mut">— 以下皆為參考,不是決策輸入</span></h2>
 {plain_svg}
 <div class="panel">{plain_sent}</div>
 {pct_line}
-<h2>GEX(S) 曲線</h2>{_svg_curve(gex['profile'], meta['fut_front'], flip, gex['flip_gp'])}
+<h3>GEX(S) 曲線</h3>{_svg_curve(gex['profile'], meta['fut_front'], flip, gex['flip_gp'])}
 <p class="mut">X 軸=假設的 TXF 價位,Y 軸=在該價位時的總曝險(<b>不是時間序列</b>)· <span style="color:#5e9bd0">■ GEX</span> <span style="color:#f0997b">■ GEX+</span> <span style="color:#b3a4ff">■ 毛 gamma</span> · <span style="color:#f5d90a">┃</span> Gamma Flip · <span style="color:#f0997b">○</span> GEX+ Flip · <span style="color:#9aa3ad">┋</span> 現價</p>
-<h2>逐履約價分布</h2>
+<h3>逐履約價分布</h3>
 <div class="grid">
   <div class="cell"><h3>GEX 各履約價</h3>
     <p class="sub">綠=正(壓抑) 紅=負(放大)· 美股慣例</p>
@@ -1258,16 +1325,16 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
 
-<h2>IV 期限結構</h2>
+<h3>IV 期限結構 <span class="mut">(不依賴符號)</span></h3>
 <p class="mut">逐到期價平 IV。<b>不依賴符號慣例</b> —— 純粹是定價。
 「遠期 IV / 區間隱含移動」由相鄰到期的變異數差反推 &radic;(&sigma;₂²T₂ &minus; &sigma;₁²T₁),
 即市場替<b>那一段時間</b>單獨定的價。曲線平 = 市場不預期特別的事;近端單獨墊高 = 有事件被標價。</p>
 {term_html}
 
-<h2>OI 集中價位</h2>
+<h3>OI 集中價位</h3>
 <div class="panel">最集中三檔(以 |GEX| 佔全場比重,<span class="mut">不依賴符號</span>):{conc_html}
 <br><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
-<h2>符號日誌(自營商淨部位走勢)</h2>
+<h3>符號日誌(自營商淨部位走勢)</h3>
 <p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)<br>{signlog_note}</p>
 {signlog_svg}
 {inst_html}
