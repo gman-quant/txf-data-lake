@@ -926,14 +926,16 @@ def _scale_panel(gex, meta):
     for lab, T in WIN:
         pts = iv * math.sqrt(T) * F
         rows += (f"<tr><td>{lab}</td><td style='text-align:right'><b>&plusmn;{pts:,.0f} 點</b></td>"
+                 f"<td style='text-align:right'>{pts*10:,.0f}</td>"
                  f"<td style='text-align:right'>{pts*50:,.0f}</td>"
                  f"<td style='text-align:right'>{pts*200:,.0f}</td></tr>")
     vrp = (iv - hv) if hv else None
     head = (f"近月 ATM IV <b>{iv:.1%}</b>"
             + (f" · 歷史第 <b>{pct:.0f}</b> 百分位" if pct is not None else "")
             + (f" · 近 20 日已實現 {hv:.1%} · <b>差 {vrp:+.1%}</b>" if hv else ""))
-    tbl = ("<table><tr><th>視窗</th><th>1&sigma; 移動</th><th>小台 1 口(元)</th>"
-           "<th>大台 1 口(元)</th></tr>" + rows + "</table>")
+    tbl = ("<table><tr><th>視窗</th><th>1&sigma; 移動</th>"
+           "<th>微台 TMF 1 口(元)</th><th>小台 MXF 1 口(元)</th>"
+           "<th>大台 TXF 1 口(元)</th></tr>" + rows + "</table>")
     note = ""
     if vrp is not None:
         note = ("<p class='mut' style='margin:6px 0 0'>⚠️ 這是 <b>IV &minus; 近 20 日已實現</b>,"
