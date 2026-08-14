@@ -500,16 +500,24 @@ def compute_gex(series, S, beta=1.0):
     #     (1σ 中位由 244 → 341 點)。**用 σ,不要用點數。**
     #   ⚠ 結算價以**現貨指數**計算 → 這個區間是指數點位,不是 TXF 點位。
     CAL = {1: (43.4, 67.1, 81.5), 3: (41.5, None, 79.2), 5: (40.0, None, 75.0)}
-    settle = None
-    if ts_rows and ts_rows[0].get("fwd"):
-        f0, iv0, td0 = ts_rows[0]["fwd"], ts_rows[0]["iv"], ts_rows[0]["Td"]
+    _WD = "一二三四五六日"
+    settles = []
+    for tr in ts_rows[:3]:
+        if not tr.get("fwd"):
+            continue
+        f0, iv0, td0 = tr["fwd"], tr["iv"], tr["Td"]
         sg = iv0 * math.sqrt(td0 / 365.0) * f0
         k = min(CAL, key=lambda x: abs(x - td0))
-        settle = {"code": ts_rows[0]["code"], "date": ts_rows[0]["date"], "Td": td0,
-                  "fwd": f0, "iv": iv0, "sigma": sg,
-                  "cal_key": k, "cal_far": (td0 > 6),
-                  "b08": (f0 - 0.8 * sg, f0 + 0.8 * sg, CAL[k][1]),
-                  "b10": (f0 - sg, f0 + sg, CAL[k][2])}
+        try:
+            wd = _WD[date.fromisoformat(tr["date"]).weekday()]
+        except Exception:
+            wd = "?"
+        settles.append({"code": tr["code"], "date": tr["date"], "wd": wd, "Td": td0,
+                        "fwd": f0, "iv": iv0, "sigma": sg, "oi": tr["oi"],
+                        "cal_far": (td0 > 6),
+                        "b08": (f0 - 0.8 * sg, f0 + 0.8 * sg, CAL[k][1]),
+                        "b10": (f0 - sg, f0 + sg, CAL[k][2])})
+    settle = settles[0] if settles else None
 
     # ── 集中度(sign-free:用 |GEX| 佔比,不受符號慣例影響)──────────
     absg = {k: abs(v) for k, v in gex_us.items()}
@@ -524,7 +532,7 @@ def compute_gex(series, S, beta=1.0):
             "beta_scan": beta_scan, "beta_span": beta_span,
             "vex_deep_k": vex_deep[0], "vex_deep_v": vex_deep[1],
             "term": ts_rows, "front_iv": front_iv, "day_move": day_move,
-            "conc": conc, "settle": settle,
+            "conc": conc, "settle": settle, "settles": settles,
             "profile": prof, "flip_us": zero_cross(1), "flip_gp": zero_cross(3),
             "ratio_eff": (rsum / wsum) if wsum else 1.0,
             "ratio_range": (min((x.get("ratio", 1.0) for x in series), default=1.0),
@@ -876,6 +884,52 @@ def _plain_map(gex, fut_front, atr=None, w=880, h=250):
     return svg, sent
 
 
+def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
+    """結算價區間的視覺化:最近三個到期各一列,共用同一條 X 軸(可直接互相比較)。
+    ⚠ X 軸是**現貨指數**點位(結算以現貨計算),不是 TXF。"""
+    if not settles:
+        return "<p class='mut'>(無可用到期)</p>"
+    lo = min(s["b10"][0] for s in settles)
+    hi = max(s["b10"][1] for s in settles)
+    pad = (hi - lo) * 0.10 or 100
+    lo, hi = lo - pad, hi + pad
+    h = 46 + row_h * len(settles)
+    X = lambda v: 20 + (v - lo) / (hi - lo) * (w - 40)
+    P = [f'<rect x="0" y="0" width="{w}" height="{h}" fill="#0b0e13"/>']
+    # 頂部刻度
+    step = 10 ** math.floor(math.log10((hi - lo) / 4))
+    for m in (1, 2, 5, 10):
+        if (hi - lo) / (step * m) <= 6:
+            step *= m
+            break
+    tk = math.ceil(lo / step) * step
+    while tk <= hi:
+        P.append(f'<line x1="{X(tk):.0f}" y1="22" x2="{X(tk):.0f}" y2="{h-8}" stroke="#1c222b"/>'
+                 f'<text x="{X(tk):.0f}" y="15" fill="#5a6470" font-size="12" '
+                 f'text-anchor="middle">{tk:,.0f}</text>')
+        tk += step
+    for i, s in enumerate(settles):
+        y = 34 + row_h * i
+        a10, b10, h10 = s["b10"]
+        a08, b08, h08 = s["b08"]
+        P.append(f'<rect x="{X(a10):.0f}" y="{y+16:.0f}" width="{X(b10)-X(a10):.0f}" height="26" '
+                 f'fill="#26a69a" opacity="0.16" rx="3"/>')
+        P.append(f'<rect x="{X(a08):.0f}" y="{y+16:.0f}" width="{X(b08)-X(a08):.0f}" height="26" '
+                 f'fill="#26a69a" opacity="0.34" rx="3"/>')
+        P.append(f'<line x1="{X(s["fwd"]):.0f}" y1="{y+12:.0f}" x2="{X(s["fwd"]):.0f}" '
+                 f'y2="{y+46:.0f}" stroke="#f5d90a" stroke-width="2"/>')
+        P.append(f'<text x="20" y="{y+10:.0f}" fill="#e6e8eb" font-size="15">'
+                 f'<tspan font-weight="bold">{s["date"][5:]}(週{s["wd"]})</tspan>'
+                 f'<tspan fill="#9aa3ad" font-size="13"> {s["code"]} · 剩 {s["Td"]:.0f} 日'
+                 f' · IV {s["iv"]:.1%} · OI {s["oi"]:,}</tspan></text>')
+        P.append(f'<text x="{X(a10):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13">{a10:,.0f}</text>'
+                 f'<text x="{X(b10):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13" '
+                 f'text-anchor="end">{b10:,.0f}</text>'
+                 f'<text x="{X(s["fwd"]):.0f}" y="{y+57:.0f}" fill="#f5d90a" font-size="13" '
+                 f'text-anchor="middle">{s["fwd"]:,.0f}</text>')
+    return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(P)}</svg>'
+
+
 def _svg_signlog(d, days=45, w=880, h=230):
     """回傳 (svg, 說明文字)。"""
     """B4:自營商 call/put 淨部位時間序列 —— 「符號會不會翻面」的證據鏈。"""
@@ -1066,25 +1120,23 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                     f" · 現價到 flip {_terr:.2f}%")
 
     # ── 結算區間 ─────────────────────────────────────────────────────
-    _st = gex.get("settle")
-    if _st:
-        def _band(b, lab):
-            lo, hi, hit = b
-            h = f"歷史命中 <b>{hit:.0f}%</b>" if hit else "<span class='mut'>此天期未校準</span>"
-            return (f"<tr><td>{lab}</td><td style='text-align:right'><b>{lo:,.0f} – {hi:,.0f}</b></td>"
-                    f"<td style='text-align:right'>&plusmn;{(hi-lo)/2:,.0f} 點</td><td>{h}</td></tr>")
-        settle_html = (
-            f"<div class='panel'><b>{_st['code']}</b> · {_st['date']} 結算 · 剩 {_st['Td']:.0f} 日"
-            f" · parity 遠期價 <b>{_st['fwd']:,.0f}</b> · ATM IV {_st['iv']:.1%}"
-            f" · 1&sigma; = {_st['sigma']:,.0f} 點"
-            "<table style='margin-top:8px'><tr><th>區間</th><th>指數點位</th><th>寬度</th><th>校準</th></tr>"
-            + _band(_st["b08"], "&plusmn;0.8&sigma;") + _band(_st["b10"], "&plusmn;1.0&sigma;")
-            + "</table>"
-            + ("<p class='mut' style='margin:6px 0 0'>⚠️ 此天期未經校準(僅驗過剩 1/3/5 日),"
-               "命中率僅供參考。</p>" if _st["cal_far"] else "")
-            + "</div>")
-    else:
-        settle_html = "<p class='mut'>(近月遠期價或 IV 不足,無法估區間)</p>"
+    _sts = gex.get("settles") or []
+    settle_svg = _svg_settle_bands(_sts, meta.get("fut_front", 0))
+    settle_html = ""
+    if _sts:
+        settle_html = "<div class='panel'><table><tr><th>結算日</th><th>剩餘</th>"             "<th>中心(遠期價)</th><th>±0.8&sigma;(命中約 67%)</th><th>±1.0&sigma;(命中約 82%)</th></tr>"
+        for s_ in _sts:
+            far = " <span class='mut'>(此天期未校準)</span>" if s_["cal_far"] else ""
+            settle_html += (
+                f"<tr><td><b>{s_['date']}(週{s_['wd']})</b><br>"
+                f"<span class='mut'>{s_['code']}</span></td>"
+                f"<td style='text-align:right'>{s_['Td']:.0f} 日</td>"
+                f"<td style='text-align:right'><b>{s_['fwd']:,.0f}</b></td>"
+                f"<td style='text-align:right'>{s_['b08'][0]:,.0f} – {s_['b08'][1]:,.0f}"
+                f"<br><span class='mut'>&plusmn;{(s_['b08'][1]-s_['b08'][0])/2:,.0f} 點</span></td>"
+                f"<td style='text-align:right'>{s_['b10'][0]:,.0f} – {s_['b10'][1]:,.0f}"
+                f"<br><span class='mut'>&plusmn;{(s_['b10'][1]-s_['b10'][0])/2:,.0f} 點{far}</span></td></tr>")
+        settle_html += "</table></div>"
 
     # ── 期限結構表 ───────────────────────────────────────────────────
     _tr = gex.get("term") or []
@@ -1180,6 +1232,15 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">flip 距離(以一日隱含波動為尺)</div>
 <div class="v {read_cls}">{read_v}</div><div class="n">{read_sub}</div></div>
 </div>
+<h2>📍 結算價會落在哪 <span class="mut">(最近三個到期)</span></h2>
+<p class="mut">深色帶 = <b>±0.8&sigma;,約 67% 的結算落在裡面</b>;淺色帶 = ±1.0&sigma;,約 82%。
+黃線 = 中心(選擇權推算的遠期價)。<br>
+校準自 2024-01~2026-08 共 173 個「剩 1 日」的週選實測(剩 3 日 79%、剩 5 日 75%)。
+⚠️ 這是<b>現貨指數</b>點位(結算以現貨計算),不是 TXF 點位。
+⚠️ <b>別用固定點數</b>:同一個「±200 點」2025 上半年命中 76.8%、2025-07 後掉到 42.3%,因為波動水位會變。</p>
+{settle_svg}
+{settle_html}
+
 <h2>結構地圖</h2>
 {plain_svg}
 <div class="panel">{plain_sent}</div>
@@ -1196,16 +1257,6 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
     {_svg_bars(gex['vex_vn'], meta['fut_front'], None, thr=0.02, unit="億/vol點", w=700, h=340, conv=1/rr)}</div>
 </div>
 <p class="mut">全報表 <b>TXF 座標</b>(履約價 ×{1/rr:.4f},{conv_note})</p>
-
-<h2>結算區間預估</h2>
-<p class="mut">用近月的 <b>parity 遠期價 + ATM IV</b> 換算。⚠️ 結算價以<b>現貨指數</b>計算,
-故此區間是<b>指數點位</b>,不是 TXF 點位。<br>
-校準:2024-01~2026-08 共 173 個「剩 1 日」的週選觀測(結算價=TSE 09:00–09:14 均值)——
-±0.5&sigma; 43.4% · <b>±0.8&sigma; 67.1%</b> · <b>±1.0&sigma; 81.5%</b>(常態理論 38.3 / 57.6 / 68.3)。
-<b>選擇權替結算定的區間偏寬</b>,要 ~68% 把握用 0.8&sigma; 就夠。<br>
-⚠️ <b>不要用固定點數</b>:同一個「±200 點」在 2025 上半年命中 76.8%、2025-07 之後掉到 42.3%
-(1&sigma; 中位由 244 → 341 點)。波動水位會變,點數不是穩定單位。</p>
-{settle_html}
 
 <h2>IV 期限結構</h2>
 <p class="mut">逐到期價平 IV。<b>不依賴符號慣例</b> —— 純粹是定價。
