@@ -36,7 +36,7 @@ PYTHONUTF8=1 .venv/Scripts/python.exe validate_lake.py --date 2026-07-03  # 驗�
 - 寫入前的髒資料防線:`_clean_sunday`(週日)、Phase-1.6 幻影守衛(max(ts) 日期 ≠ 請求日 → 整批跳過,**這就是自動化不需要假日日曆的原因**)、resampler 的 `date.weekday()<6` 過濾;事後另有 validate_lake。(⚠ 命名注意:main_etl 註解與 memory 裡說的「三道守衛」指的是**只防週末**的那組 = resampler `date<6` + `_clean_sunday` + validate_lake ②,不含 Phase-1.6 —— 兩份清單成員不同,別搞混。)
 - 假日測試盤判別看 **volume**(正常日盤 7–9 萬 vs 測試盤個位數~幾百)。
 - 已知 schema 地雷:盤中 kbar ts 是 `us`、1d/raw 是 `ns`(跨檔 concat 會 SchemaError);動態 TF(15m/30m/4h)重採樣沒帶 true_pv_sum → VWAP 是 (H+L+C)/3 近似;TSE 收 13:33 vs TXF 13:44 → 尾盤與夜盤 basis 是 stale-spot。
-- **2026-08-15 起 kbar 一律 12 欄**:`true_pt_sum`(∫P dt,棒邊界切片)+ `dur_s`(恆=桶名目長)——TWMA 的 tick 級可加量(語意正典=platform `wiki/MA-Semantics.md` §6)。全史已回填(嫁接制,舊欄位元不動);**55 檔/列 pt=null 是刻意例外**(raw 事後被重抓的 13 個零星日等,清單 `D:/txf-data/kbars_backfill_pt_failures.txt`)——**別把 null 當缺損去「修」**,重算會改到 OHLC 舊值,裁決權在使用者。備份 `kbars_backup_pre_ptsum/`。
+- **2026-08-15 起 kbar 一律 12 欄**:`true_pt_sum`(∫P dt,棒邊界切片)+ `dur_s`(恆=桶名目長)——TWMA 的 tick 級可加量(語意正典=platform `wiki/MA-Semantics.md` §6)。全史已回填+例外已修復(嫁接→裁決→重建,`tools/backfill_pt_sum.py` + `tools/repair_pt_exceptions.py`);**唯一殘留 pt=null = TXFR2 2025-01-06**(重抓實測 Shioaji 只回日盤 —— 該日週五夜盤資料 API 端已滅失,舊 kbars 的夜盤棒是唯一倖存副本,**別再試圖修**)。⚠ resampler 的兩處 sort 帶 `maintain_order=True` 是**契約不是裝飾**:平手序=raw 檔到達序;拿掉它,特定 chunk 型態的檔重算就會換序(2026-08-15 實證 13 天中招)。備份:`kbars_backup_pre_ptsum/`(回填前)、`repair_backup_20260815/`(修復前)。
 - Polars weekday:Mon=1…Sun=7(`<6` 留平日)。
 
 ## 自動化(現行真相;repo 內僅 AutoRun.md 標頭有摘要)

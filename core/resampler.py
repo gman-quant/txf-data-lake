@@ -124,7 +124,10 @@ def _pt_slice_columns(q: pl.LazyFrame, timeframe: str) -> pl.LazyFrame:
         q = q.with_columns(
             pl.min_horizontal(pl.col("_bkt") + step, lim_us).alias("_bkt_end"))
     grp = ["date", "session"]
-    q = (q.sort(grp + ["_us_raw"])
+    # maintain_order:同 µs tick 的平手序**釘死為輸入列序**(raw 檔=到達序=唯一真值)。
+    # 2026-08-15 複審確認:polars 預設不保證平手序(實務穩定是實作行為非契約),
+    # 升版後 fix_kbars/自癒重建會與存檔靜默分歧,且 fix_kbars 不含 1d ⇒ 跨 TF pt 不一致。
+    q = (q.sort(grp + ["_us_raw"], maintain_order=True)
          .with_columns([
              pl.col("close").shift(1).over(grp).alias("_prev_px"),
              pl.col("_us").shift(-1).over(grp).alias("_next_us")]))
@@ -157,7 +160,7 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     # 2. 建立 "Trading Date" (交易日)
     # 邏輯：如果是 00:00 ~ 05:00 之間的資料，日期要減 1 天 (歸到昨晚)
     # 這樣如 12/06 03:00 的夜盤，就會被標記為 12/05 的 Night
-    q = tick_df.lazy().sort("ts").with_columns([
+    q = tick_df.lazy().sort("ts", maintain_order=True).with_columns([
         get_session_expression("ts"),
         
         pl.when(pl.col("ts").dt.time() < ARCHIVE_DATE_PIVOT)   # 樞紐前 → 退一天
