@@ -89,6 +89,62 @@ def _snap_aligned_ts_to_session(q: pl.LazyFrame, timeframe: str) -> pl.LazyFrame
 
     return q.with_columns(snapped)
 
+def _pt_slice_columns(q: pl.LazyFrame, timeframe: str) -> pl.LazyFrame:
+    """為每筆 tick 算出它對「自己那根 K」的時間積分貢獻(棒邊界切片)。
+
+    產出四個暫存欄(µs 整數域;price 為整數時乘積在 2^53 內**精確**):
+      _pt_own / _dur_own:本筆 close × (min(下一筆, 桶尾) − 本筆) 與該時距
+      _pt_head / _dur_head:桶內首筆補頭段(進場價 ×(首筆 − 桶起));其餘筆為 0
+    盤段內的沉默自動由前一筆的價涵蓋(LOCF);**桶外**(空桶/盤段間)不在此層 ——
+    那是消費端 prefix 層的事(棒擁有其後沉默,close 計價)。"""
+    tf_sec = None if timeframe == "1d" else _timeframe_to_seconds(timeframe)
+    lim_us = (
+        pl.when(pl.col("session") == "Day")
+        .then(pl.lit(_DAY_SESSION_LIMIT_SEC * 1_000_000, dtype=pl.Int64))
+        .otherwise(pl.lit(_NIGHT_SESSION_LIMIT_SEC * 1_000_000, dtype=pl.Int64))
+    )
+    # aligned µs-of-day(用**平移後、未 snap** 的時間 —— snap 只管分桶歸屬)
+    a = (
+        pl.when(pl.col("session") == "Day")
+        .then(pl.col("ts").dt.offset_by("-8h45m"))
+        .otherwise(pl.col("ts").dt.offset_by("-15h"))
+    )
+    q = q.with_columns(
+        (a - a.dt.truncate("1d")).dt.total_microseconds().alias("_us_raw"))
+    q = q.with_columns(pl.min_horizontal(pl.col("_us_raw"), lim_us).alias("_us"))
+    if tf_sec is None:                       # 1d:桶 = 整個盤段
+        q = q.with_columns(pl.lit(0, dtype=pl.Int64).alias("_bkt"),
+                           lim_us.alias("_bkt_end"))
+    else:
+        step = tf_sec * 1_000_000
+        # 分桶跟 snap 語意:≥ 上限者歸尾桶(min(us, lim−1) // step)
+        q = q.with_columns(
+            (pl.min_horizontal(pl.col("_us_raw"), lim_us - 1) // step * step)
+            .alias("_bkt"))
+        q = q.with_columns(
+            pl.min_horizontal(pl.col("_bkt") + step, lim_us).alias("_bkt_end"))
+    grp = ["date", "session"]
+    q = (q.sort(grp + ["_us_raw"])
+         .with_columns([
+             pl.col("close").shift(1).over(grp).alias("_prev_px"),
+             pl.col("_us").shift(-1).over(grp).alias("_next_us")]))
+    q = q.with_columns([
+        pl.col("_next_us").fill_null(lim_us).alias("_next_us"),
+        pl.col("_prev_px").fill_null(pl.col("close")).alias("_prev_px"),
+        (pl.col("_bkt") != pl.col("_bkt").shift(1).over(grp))
+        .fill_null(True).alias("_first_in_bkt")])
+    q = q.with_columns(
+        (pl.min_horizontal(pl.col("_next_us"), pl.col("_bkt_end")) - pl.col("_us"))
+        .clip(lower_bound=0).alias("_dur_own"))
+    return q.with_columns([
+        (pl.col("_dur_own") * pl.col("close")).alias("_pt_own"),
+        pl.when(pl.col("_first_in_bkt"))
+          .then(pl.col("_us") - pl.col("_bkt")).otherwise(0).alias("_dur_head"),
+        pl.when(pl.col("_first_in_bkt"))
+          .then((pl.col("_us") - pl.col("_bkt")) * pl.col("_prev_px"))
+          .otherwise(0.0).alias("_pt_head")])
+
+
 def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
     
     # 1. 抓取 Symbol (修復 Bug)
@@ -111,6 +167,16 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
           .alias("date")
     ])
 
+    # 2b. 逐 tick「棒邊界切片」(2026-08-16,true_pt_sum;wiki/MA-Semantics §6)
+    #     每根 K 的 pt 恰涵蓋自己的桶 [bkt, bkt_end):
+    #       head = 進場價(桶內首筆的前一筆;盤段首筆→自身價)×(首筆 − 桶起)
+    #       own  = Σ 桶內各筆 close ×(min(下一筆, 桶尾) − 本筆)
+    #     ⇒ 每根 dur 恰為桶名目長(盤段尾桶=至收盤)—— 可驗的不變量。
+    #     與 true_pv_sum 同屬 tick 層可加量:任何 TF 的視窗和必然一致(VWAP 同機制)。
+    #     ⚠ 兩個座標刻意分開:**切片時距**用未 snap 的 aligned 時間 cap 在盤段上限
+    #       (grace tick 時距=0,不與真末筆重複計時);**分桶**跟 snap 語意(歸尾桶)。
+    q = _pt_slice_columns(q, timeframe)
+
     # 3. 定義基礎數據聚合 (不含 ts)
     aggs = [
         pl.col("close").first().alias("open"),
@@ -118,7 +184,10 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
         pl.col("close").min().alias("low"),
         pl.col("close").last().alias("close"),
         pl.col("volume").sum().alias("volume"),
-        (pl.col("close") * pl.col("volume")).sum().alias("true_pv_sum")
+        (pl.col("close") * pl.col("volume")).sum().alias("true_pv_sum"),
+        # true_pt_sum(price·µs,最後除 1e6 轉 price·秒)/ dur(µs)
+        (pl.col("_pt_head") + pl.col("_pt_own")).sum().alias("_pt_us"),
+        (pl.col("_dur_head") + pl.col("_dur_own")).sum().alias("_dur_us"),
     ]
     
     # TXF 特殊欄位
@@ -169,6 +238,13 @@ def resample_to_kbars(tick_df: pl.DataFrame, timeframe: str):
             .otherwise(pl.col("aligned_ts").dt.offset_by("15h"))
             .alias("ts")
         ).drop("aligned_ts")
+
+    # 4b. µs 整數域 → 儲存單位(true_pt_sum = price·秒;dur_s = 秒)。
+    #     除法只做**一次**(桶內加總在精確整數域完成)⇒ 跨 TF 一致性最佳。
+    q = q.with_columns([
+        (pl.col("_pt_us") / 1_000_000).alias("true_pt_sum"),
+        (pl.col("_dur_us") / 1_000_000).alias("dur_s"),
+    ]).drop(["_pt_us", "_dur_us"])
 
     # 5. 通用過濾
     q = q.filter(pl.col("volume") > 0)
