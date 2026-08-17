@@ -59,7 +59,7 @@ __all__ = [
     "DATA_ROOT", "DATA_LAKE_KBAR_DIR",
     "LAYOUT", "DEFAULT_LAYOUT", "layout_of",
     "require_roots", "kbar_dir", "kbar_paths", "kbar_paths_for_days",
-    "latest_kbar_file",
+    "list_kbar_files", "latest_kbar_file",
 ]
 
 
@@ -222,23 +222,34 @@ def kbar_paths_for_days(tf, symbol, days, existing_only=True):
     return paths
 
 
-def latest_kbar_file(tf, symbol):
-    """該 tf/symbol **最新的** kbar 檔(沒有則 None)。
+def list_kbar_files(tf, symbol):
+    """該 tf/symbol **所有**現存的 kbar 檔,依時間排序(沒有則空 list)。
 
-    用途:Gap Recovery 起點要知道湖裡最後一根 K 棒在哪。
-    ⚠️ 呼叫端原本自己 `os.listdir` 年份目錄再挑最後一個 —— 那是**佈局知識外洩**,
-    佈局一改就壞。改由這裡負責:兩種佈局的檔名都是「字典序 = 時間序」
+    ⚠️ 刻意用 `os.walk` 而不是「逐日組路徑再 exists」:全史用日期展開會是**上萬次
+    stat**,在機械碟上要數十秒。走目錄一次就好。
+
+    排序依據是**檔名**:兩種佈局的檔名都滿足「字典序 = 時間序」
     (daily 是 `YYYY-MM-DD_…`,yearly 是 `SYM_tf_YYYY`),所以同一套排序都適用。
+    🔒 之後加 monthly(`SYM_tf_YYYY-MM`)也仍然成立 —— 新增佈局時要複驗這個前提。
     """
     require_roots(CACHE_ROOT)
     root = os.path.join(CACHE_ROOT, tf, symbol)
     if not os.path.isdir(root):
-        return None
-    best = None
+        return []
+    found = []
     for dirpath, _dirnames, filenames in os.walk(root):
         for fn in filenames:
-            if not fn.endswith(".parquet"):
-                continue
-            if best is None or fn > best[0]:
-                best = (fn, os.path.join(dirpath, fn))
-    return best[1] if best else None
+            if fn.endswith(".parquet"):
+                found.append((fn, os.path.join(dirpath, fn)))
+    found.sort(key=lambda x: x[0])
+    return [p for _fn, p in found]
+
+
+def latest_kbar_file(tf, symbol):
+    """該 tf/symbol **最新的** kbar 檔(沒有則 None)。
+
+    用途:Gap Recovery 起點要知道湖裡最後一根 K 棒在哪。
+    呼叫端原本自己 `os.listdir` 年份目錄再挑最後一個 —— 那是**佈局知識外洩**。
+    """
+    files = list_kbar_files(tf, symbol)
+    return files[-1] if files else None
