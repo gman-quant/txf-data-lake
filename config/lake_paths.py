@@ -58,7 +58,8 @@ __all__ = [
     "ARCHIVE_ROOT", "CACHE_ROOT",
     "DATA_ROOT", "DATA_LAKE_KBAR_DIR",
     "LAYOUT", "DEFAULT_LAYOUT", "layout_of",
-    "require_roots", "kbar_dir", "kbar_paths",
+    "require_roots", "kbar_dir", "kbar_paths", "kbar_paths_for_days",
+    "latest_kbar_file",
 ]
 
 
@@ -199,3 +200,45 @@ def kbar_paths(tf, symbol, start, end, existing_only=True):
     if existing_only:
         paths = [p for p in paths if os.path.exists(p)]
     return paths
+
+
+def kbar_paths_for_days(tf, symbol, days, existing_only=True):
+    """指定的**一組日子**(可以不連續)對應的 kbar 檔,去重後依時間排序。
+
+    為什麼要和 `kbar_paths` 分開:呼叫端有時手上是一份「缺哪幾天」的清單
+    (例:`historical.py` 的 per-day 結算快取補洞)。用區間會多讀已經有的日子;
+    而 per-month 佈局下「一天一檔」不再成立,**多個日子可能對到同一個檔** ——
+    去重這件事必須由知道佈局的這一層做,不能留給呼叫端。
+    """
+    require_roots(CACHE_ROOT)
+    seen, paths = set(), []
+    for d in sorted(_as_date(x) for x in days):
+        for p in kbar_paths(tf, symbol, d, d, existing_only=False):
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
+    if existing_only:
+        paths = [p for p in paths if os.path.exists(p)]
+    return paths
+
+
+def latest_kbar_file(tf, symbol):
+    """該 tf/symbol **最新的** kbar 檔(沒有則 None)。
+
+    用途:Gap Recovery 起點要知道湖裡最後一根 K 棒在哪。
+    ⚠️ 呼叫端原本自己 `os.listdir` 年份目錄再挑最後一個 —— 那是**佈局知識外洩**,
+    佈局一改就壞。改由這裡負責:兩種佈局的檔名都是「字典序 = 時間序」
+    (daily 是 `YYYY-MM-DD_…`,yearly 是 `SYM_tf_YYYY`),所以同一套排序都適用。
+    """
+    require_roots(CACHE_ROOT)
+    root = os.path.join(CACHE_ROOT, tf, symbol)
+    if not os.path.isdir(root):
+        return None
+    best = None
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            if not fn.endswith(".parquet"):
+                continue
+            if best is None or fn > best[0]:
+                best = (fn, os.path.join(dirpath, fn))
+    return best[1] if best else None
