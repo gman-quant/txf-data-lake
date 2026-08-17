@@ -68,42 +68,56 @@ def _days_for(symbol, d_from, d_to):
     return out
 
 
-def _cmp(built, stored):
-    """回傳 None 表示相同,否則回傳一句話說明第一個差異。
+#: 累加型欄位:值是「把當根所有 tick 加起來」,**加總順序不同就會有 float 尾差**。
+#: 逐位元比對對它們是錯的尺 —— 2026-08-17 全史對帳實測:TSE 30m 有 1,611 天
+#: 落在最大相對誤差 2.91e-16(float64 機器 epsilon 是 2.22e-16),而其餘 11 欄逐位元相同。
+#: 那不是資料錯,是歷史回填的加總順序與現行 ETL 不同。
+ACCUM_COLS = {"true_pv_sum", "true_pt_sum", "dur_s"}
+DEFAULT_REL_TOL = 1e-12          # 遠大於 float 噪音、遠小於任何真實差異
+
+
+def _cmp(built, stored, rel_tol=DEFAULT_REL_TOL):
+    """回傳 (結論, 是否僅為 float 尾差)。結論為 None 表示相同。
 
     刻意**不用** `df.equals()` 一句帶過:那樣只會得到 True/False,
-    而我們需要知道**哪一欄、差多少** —— 不然報告只能說「不對」,無法據以判斷。
+    而我們需要知道**哪一欄、差多少** —— 不然報告只能說「不對」,無法據以判斷
+    「是資料問題」還是「是浮點加總順序」。這兩者的處置天差地遠。
     """
     if built.height != stored.height:
-        return f"列數 {built.height} vs {stored.height}"
+        return f"列數 {built.height} vs {stored.height}", False
     bc, sc = set(built.columns), set(stored.columns)
     if bc != sc:
-        return f"欄位不同:重建多 {sorted(bc - sc)} / 存檔多 {sorted(sc - bc)}"
+        return f"欄位不同:重建多 {sorted(bc - sc)} / 存檔多 {sorted(sc - bc)}", False
     cols = list(stored.columns)
     b = built.select(cols).sort("ts")
     s = stored.select(cols).sort("ts")
+    had_tolerated = False               # 有差、但落在累加欄的容忍內
     for c in cols:
         bs, ss = b[c], s[c]
         if bs.dtype != ss.dtype:
-            return f"欄 {c} dtype {bs.dtype} vs {ss.dtype}"
+            return f"欄 {c} dtype {bs.dtype} vs {ss.dtype}", False
         try:
-            same = bs.equals(ss)
+            if bs.equals(ss):
+                continue
         except Exception:
-            same = bs.to_list() == ss.to_list()
-        if not same:
-            bl, sl = bs.to_list(), ss.to_list()
-            for i, (x, y) in enumerate(zip(bl, sl)):
-                if x != y and not (x is None and y is None):
-                    return f"欄 {c} 第 {i} 列 {x!r} vs {y!r}"
-            return f"欄 {c} 不符(逐列比對找不到位置,可能是 null 語意)"
-    return None
+            if bs.to_list() == ss.to_list():
+                continue
+        for i, (x, y) in enumerate(zip(bs.to_list(), ss.to_list())):
+            if x == y or (x is None and y is None):
+                continue
+            if (c in ACCUM_COLS and isinstance(x, float) and isinstance(y, float)
+                    and abs(x - y) <= rel_tol * max(abs(x), abs(y), 1.0)):
+                had_tolerated = True
+                continue
+            return f"欄 {c} 第 {i} 列 {x!r} vs {y!r}", False
+    return None, had_tolerated
 
 
-def verify_day(symbol, day, tfs):
+def verify_day(symbol, day, tfs, rel_tol=DEFAULT_REL_TOL):
     """回傳 {tf: None|說明},以及讀檔耗時。"""
     raw = tick_path(symbol, day)
     if not os.path.exists(raw):
-        return {tf: "raw 不存在" for tf in tfs}, 0.0
+        return {tf: ("raw 不存在", False) for tf in tfs}, 0.0
     t0 = time.time()
     ticks = pl.read_parquet(raw)
     dt_read = time.time() - t0
@@ -114,13 +128,14 @@ def verify_day(symbol, day, tfs):
         try:
             built = resample_to_kbars(ticks, tf)
         except Exception as e:
-            res[tf] = f"重建拋例外:{type(e).__name__}: {e}"
+            res[tf] = (f"重建拋例外:{type(e).__name__}: {e}", False)
             continue
         if not stored_paths:
-            res[tf] = None if built.is_empty() else f"存檔缺,但重建出 {built.height} 列"
+            res[tf] = (None if built.is_empty()
+                       else f"存檔缺,但重建出 {built.height} 列", False)
             continue
         stored = pl.read_parquet(stored_paths[0])
-        res[tf] = _cmp(built, stored)
+        res[tf] = _cmp(built, stored, rel_tol)
     return res, dt_read
 
 
@@ -148,16 +163,24 @@ def self_test():
     if prev:
         cases.append(("拿別天的檔來比", pl.read_parquet(prev[0]), "欄 "))
 
+    # 累加欄的容忍不可以寬到蓋掉真差異:造一個「剛好超過容忍」的 pv_sum
+    accum = next((c for c in ("true_pv_sum", "true_pt_sum") if c in s.columns), None)
+    if accum:
+        cases.append((f"{accum} 超出容忍(×1.001)",
+                      s.with_columns(pl.col(accum) * 1.001), f"欄 {accum}"))
+        cases.append((f"{accum} 在容忍內(+1e-15 相對)",
+                      s.with_columns(pl.col(accum) * (1 + 1e-15)), None))
+
     ok = True
     for name, built, expect in cases:
-        why = _cmp(built, s)
-        if expect is None:
-            good = why is None
-        else:
-            good = why is not None and expect in why
+        why, tol = _cmp(built, s)
+        good = (why is None) if expect is None else (why is not None and expect in why)
         ok &= good
-        print(f"  {'✅' if good else '🔴'} {name:<22} → {why or '相同'}")
-    print(f"\n{'✅ 比較器不是恆綠的' if ok else '🔴 比較器有漏 —— 對帳結果不可信'}")
+        mark = "相同" if why is None else why
+        if why is None and tol:
+            mark += "(有 float 尾差,在容忍內)"
+        print(f"  {'✅' if good else '🔴'} {name:<28} → {mark}")
+    print(f"\n{'✅ 比較器不是恆綠的,而且容忍沒有寬到蓋掉真差異' if ok else '🔴 比較器有漏 —— 對帳結果不可信'}")
     return 0 if ok else 1
 
 
@@ -173,6 +196,8 @@ def main():
                     help="等距抽樣這麼多天(0=全部)")
     ap.add_argument("--full", action="store_true", help="全史(等同不給 from/to)")
     ap.add_argument("--out", default=None, help="報告 JSON 路徑")
+    ap.add_argument("--rel-tol", type=float, default=DEFAULT_REL_TOL,
+                    help="累加型 float 欄的相對容忍(預設 1e-12)")
     ap.add_argument("--stop-after", type=int, default=0,
                     help="累積這麼多個不符就停(0=不停)")
     a = ap.parse_args()
@@ -206,22 +231,24 @@ def main():
     total = sum(len(v) for v in plan.values())
     print(f"\n共 {total} 個 (商品,日) 組合 × {len(tfs)} 個 TF = {total * len(tfs)} 次比對\n")
 
-    mismatches, errors = [], []
+    mismatches, errors, tolerated = [], [], []
     done = 0
     t_start = time.time()
     for sym, days in plan.items():
         for day in days:
             try:
-                res, _ = verify_day(sym, day, tfs)
+                res, _ = verify_day(sym, day, tfs, a.rel_tol)
             except Exception as e:
                 errors.append({"symbol": sym, "date": day,
                                "error": f"{type(e).__name__}: {e}",
                                "trace": traceback.format_exc()[-500:]})
                 done += 1
                 continue
-            for tf, why in res.items():
+            for tf, (why, tol) in res.items():
                 if why is not None:
                     mismatches.append({"symbol": sym, "date": day, "tf": tf, "why": why})
+                elif tol:
+                    tolerated.append({"symbol": sym, "date": day, "tf": tf})
             done += 1
             if done % 100 == 0 or done == total:
                 el = time.time() - t_start
@@ -239,7 +266,8 @@ def main():
     el = time.time() - t_start
     print(f"\n{'=' * 62}")
     print(f"比對 {done}/{total} 組合,耗時 {el:.0f}s")
-    print(f"不符:{len(mismatches)}    錯誤:{len(errors)}")
+    print(f"不符:{len(mismatches)}    錯誤:{len(errors)}    "
+          f"僅 float 尾差(容忍內):{len(tolerated)}")
     if mismatches:
         by_tf = {}
         for m in mismatches:
@@ -256,6 +284,7 @@ def main():
             json.dump({"verdict": verdict, "checked": done, "total": total,
                        "elapsed_s": round(el, 1), "symbols": symbols, "tfs": tfs,
                        "mismatches": mismatches, "errors": errors,
+                       "tolerated_float_only": tolerated, "rel_tol": a.rel_tol,
                        "archive_root": ARCHIVE_ROOT, "cache_root": CACHE_ROOT,
                        "generated": dt.datetime.now().isoformat(timespec="seconds")},
                       fh, ensure_ascii=False, indent=2)
