@@ -24,7 +24,11 @@ if hasattr(sys.stdout, "reconfigure"):
 import numpy as np
 import polars as pl
 
-DATA_ROOT = Path(r"D:\txf-data")
+# 2026-08-17:本檔原本**繞過自家 config/settings** 自己寫死一份路徑 ——
+# 兩處分歧的話沒有任何東西會警告。改走 vendored 正典。
+from config.lake_paths import ARCHIVE_ROOT
+
+DATA_ROOT = Path(ARCHIVE_ROOT)
 TXO_ROOT = DATA_ROOT / "txo"
 UA = {"User-Agent": "Mozilla/5.0"}
 MULT = 50.0  # TXO 每點 NT$50

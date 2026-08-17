@@ -11,7 +11,11 @@ SECRET_KEY = os.environ.get("SHIOAJI_SECRET_KEY")
 
 # 資料儲存根目錄
 # DATA_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'txf-data')
-DATA_ROOT = os.environ.get("DATA_ROOT", r"D:\txf-data")
+# 2026-08-17:改由 `config/lake_paths.py`(vendored 正典)提供。
+# 舊寫法 `os.environ.get("DATA_ROOT", ...)` 方向是對的(本 repo 是四個裡唯一可覆寫的),
+# 但**環境變數名無前綴**容易撞名,而且另外三個 repo 各寫各的、各自不可覆寫。
+# 現在四份共用同一套解析規則:TXF_ARCHIVE_ROOT > DATA_ROOT(相容) > 出廠預設。
+from config.lake_paths import ARCHIVE_ROOT, CACHE_ROOT, DATA_ROOT  # noqa: F401
 
 # 結算與調整資料目錄
 ADJUSTMENTS_DIR = os.path.join(DATA_ROOT, "adjustments")
