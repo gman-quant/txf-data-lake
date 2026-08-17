@@ -57,7 +57,7 @@ __all__ = [
     "LakePathError",
     "ARCHIVE_ROOT", "CACHE_ROOT",
     "DATA_ROOT", "DATA_LAKE_KBAR_DIR",
-    "LAYOUT", "DEFAULT_LAYOUT", "layout_of",
+    "LAYOUT", "DEFAULT_LAYOUT", "LAYOUTS", "layout_of",
     "require_roots", "kbar_dir", "kbar_paths", "kbar_paths_for_days",
     "list_kbar_files", "latest_kbar_file",
     "tick_dir", "tick_path", "list_tick_files",
@@ -138,16 +138,30 @@ def require_roots(*roots):
 #:    被咬過四次的那一族(`combine` 判準借用名字字串、`time_fmt` 三層推導…)。
 #:
 #: 2026-08-17 現況:1d 是年檔、其餘是日檔(六年演化下來的結果,不是設計)。
-#: 之後改 per-month 只需要動這張表 + 對應的檔名規則。
+#:
+#: 檔名規則(三種佈局的字典序都 = 時間序,`list_kbar_files` 的排序才成立):
+#:   daily    `<tf>/<sym>/<YYYY>/<YYYY-MM-DD>_<SYM>_<TF>.parquet`
+#:   monthly  `<tf>/<sym>/<SYM>_<TF>_<YYYY-MM>.parquet`
+#:   yearly   `<tf>/<sym>/<SYM>_<TF>_<YYYY>.parquet`
+#:
+#: 🔒 **改這張表就是改佈局** —— 讀寫兩端同時跟著變,不必改任何呼叫端。
+#:    但 `txf-quant-stable` 釘在 tag、跑的是舊碼 ⇒ **翻表之前必須先 promote**,
+#:    否則看盤會讀不到檔而且只會安靜地變空圖。
 LAYOUT = {
     "1d": "yearly",
 }
 DEFAULT_LAYOUT = "daily"
 
+#: 合法值域。新增佈局要同時更新 `kbar_dir` / `kbar_paths` 的分支與這裡。
+LAYOUTS = ("daily", "monthly", "yearly")
+
 
 def layout_of(tf):
-    """回傳 'daily' 或 'yearly'。"""
-    return LAYOUT.get(tf, DEFAULT_LAYOUT)
+    """回傳 'daily' / 'monthly' / 'yearly'。"""
+    v = LAYOUT.get(tf, DEFAULT_LAYOUT)
+    if v not in LAYOUTS:
+        raise LakePathError(f"未知的 kbar 佈局 {v!r}(tf={tf});合法值:{LAYOUTS}")
+    return v
 
 
 def _as_date(d):
@@ -161,14 +175,24 @@ def _as_date(d):
 def kbar_dir(tf, symbol, year=None):
     """kbar 檔所在的目錄。
 
-    daily 佈局多一層年份子目錄;yearly 佈局沒有。
+    daily 佈局多一層年份子目錄;monthly / yearly 是平的
+    (一個 tf/symbol 底下最多 79 個月檔或 7 個年檔,不值得再分層)。
     """
-    if layout_of(tf) == "yearly":
+    if layout_of(tf) in ("yearly", "monthly"):
         return os.path.join(CACHE_ROOT, tf, symbol)
     parts = [CACHE_ROOT, tf, symbol]
     if year is not None:
         parts.append(f"{int(year):04d}")
     return os.path.join(*parts)
+
+
+def _month_starts(s, e):
+    """s..e 之間每個月的 (year, month),含頭含尾。"""
+    out, y, m = [], s.year, s.month
+    while (y, m) <= (e.year, e.month):
+        out.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
 
 
 def kbar_paths(tf, symbol, start, end, existing_only=True):
@@ -186,10 +210,15 @@ def kbar_paths(tf, symbol, start, end, existing_only=True):
         return []
 
     paths = []
-    if layout_of(tf) == "yearly":
+    lay = layout_of(tf)
+    if lay == "yearly":
         for year in range(s.year, e.year + 1):
             paths.append(os.path.join(kbar_dir(tf, symbol),
                                       f"{symbol}_{tf}_{year:04d}.parquet"))
+    elif lay == "monthly":
+        for y, m in _month_starts(s, e):
+            paths.append(os.path.join(kbar_dir(tf, symbol),
+                                      f"{symbol}_{tf}_{y:04d}-{m:02d}.parquet"))
     else:
         d = s
         step = _dt.timedelta(days=1)
