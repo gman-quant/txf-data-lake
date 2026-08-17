@@ -60,6 +60,7 @@ __all__ = [
     "LAYOUT", "DEFAULT_LAYOUT", "layout_of",
     "require_roots", "kbar_dir", "kbar_paths", "kbar_paths_for_days",
     "list_kbar_files", "latest_kbar_file",
+    "tick_dir", "tick_path", "list_tick_files",
 ]
 
 
@@ -220,6 +221,50 @@ def kbar_paths_for_days(tf, symbol, days, existing_only=True):
     if existing_only:
         paths = [p for p in paths if os.path.exists(p)]
     return paths
+
+
+# --------------------------------------------------------------------------
+# archive 側:逐筆成交(ticks)
+# --------------------------------------------------------------------------
+# 🔒 archive 的佈局規則**刻意與 cache 不同,而且不打算改**:一律日檔、寫一次就不再動。
+#    理由:它補不回來 ⇒ 每個位元組只寫一次是最強的耐久性保證。cache 可以重建,
+#    所以重寫免費;archive 不行,重寫就是風險。兩邊規則相反是設計,不是不一致。
+#    ⚠️ 目錄比 kbars 多一層「月」(`<sym>/<年>/<月>/`)—— 那是既有 schema,別對齊。
+
+def tick_dir(symbol, year=None, month=None):
+    parts = [ARCHIVE_ROOT, "raw_ticks", symbol]
+    if year is not None:
+        parts.append(f"{int(year):04d}")
+        if month is not None:
+            parts.append(f"{int(month):02d}")
+    return os.path.join(*parts)
+
+
+def tick_path(symbol, d):
+    d = _as_date(d)
+    return os.path.join(tick_dir(symbol, d.year, d.month),
+                        f"{d.isoformat()}_{symbol}_ticks.parquet")
+
+
+def list_tick_files(symbol):
+    """該商品所有現存的逐筆檔,依日期排序。
+
+    ⚠️ 只認 `*_ticks.parquet`。**同一個目錄裡還躺著 `*_bidask.parquet`**
+    (178 檔 / 949 MB,2025-12 起)—— 那是五檔簿,不是逐筆成交。
+    用 `*.parquet` 一把抓會把它算進「這天有資料」而灌水。
+    """
+    require_roots(ARCHIVE_ROOT)
+    root = os.path.join(ARCHIVE_ROOT, "raw_ticks", symbol)
+    if not os.path.isdir(root):
+        return []
+    suffix = f"_{symbol}_ticks.parquet"
+    found = []
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for fn in filenames:
+            if fn.endswith(suffix):
+                found.append((fn, os.path.join(dirpath, fn)))
+    found.sort(key=lambda x: x[0])
+    return [p for _fn, p in found]
 
 
 def list_kbar_files(tf, symbol):
