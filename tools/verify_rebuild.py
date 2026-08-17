@@ -58,6 +58,22 @@ SYMBOLS = ["TXF", "TSE", "TXFR2"]
 #: 1d 是年檔累積出來的,比對方式不同(見 compare_yearly)。
 INTRADAY_TFS = [tf for tf in TIMEFRAMES if tf != "1d"]
 
+#: 已知**不可重建**的 (商品, 日期):原始 tick 已滅失,kbars 是唯一倖存副本。
+#:
+#: 為什麼要有這張表:它不列進來的話,每次全史對帳都會紅一次。**而每次都紅的檢查,
+#: 久了就會被當成雜訊忽略** —— 那時真正的新問題出現也不會有人看見。已知例外要明寫,
+#: 讓「紅燈」重新變成「有新東西」的訊號。
+#:
+#: ⚠️ 加東西進這張表**不是**修好問題,是承認它修不好。加之前必須:
+#:   ① 向資料源實測確認真的拿不到(不是轉述文件)
+#:   ② 把倖存副本複製進 `orphan_bars/` 並更新該目錄的 README
+KNOWN_UNREBUILDABLE = {
+    # TXFR2 2025-01-06:2025-01-03(五)15:00 起的夜盤在 Shioaji 端已滅失。
+    # 2026-08-17 實測 api.ticks 回 965 筆、只有日盤、夜盤 0 筆,與湖裡現存 raw 完全相同。
+    # 倖存的 607 根夜盤棒已存進 D:/txf-data/orphan_bars/(見該處 README 的鑑識時間線)。
+    ("TXFR2", "2025-01-06"),
+}
+
 
 def _days_for(symbol, d_from, d_to):
     out = []
@@ -231,7 +247,7 @@ def main():
     total = sum(len(v) for v in plan.values())
     print(f"\n共 {total} 個 (商品,日) 組合 × {len(tfs)} 個 TF = {total * len(tfs)} 次比對\n")
 
-    mismatches, errors, tolerated = [], [], []
+    mismatches, errors, tolerated, known_hits = [], [], [], []
     done = 0
     t_start = time.time()
     for sym, days in plan.items():
@@ -244,9 +260,11 @@ def main():
                                "trace": traceback.format_exc()[-500:]})
                 done += 1
                 continue
+            known = (sym, day) in KNOWN_UNREBUILDABLE
             for tf, (why, tol) in res.items():
                 if why is not None:
-                    mismatches.append({"symbol": sym, "date": day, "tf": tf, "why": why})
+                    (known_hits if known else mismatches).append(
+                        {"symbol": sym, "date": day, "tf": tf, "why": why})
                 elif tol:
                     tolerated.append({"symbol": sym, "date": day, "tf": tf})
             done += 1
@@ -267,7 +285,12 @@ def main():
     print(f"\n{'=' * 62}")
     print(f"比對 {done}/{total} 組合,耗時 {el:.0f}s")
     print(f"不符:{len(mismatches)}    錯誤:{len(errors)}    "
-          f"僅 float 尾差(容忍內):{len(tolerated)}")
+          f"僅 float 尾差(容忍內):{len(tolerated)}    "
+          f"已知不可重建:{len(known_hits)}")
+    if known_hits:
+        for sd in sorted({(k["symbol"], k["date"]) for k in known_hits}):
+            print(f"  ℹ️  {sd[0]} {sd[1]}:原始 tick 已滅失,倖存副本在 orphan_bars/"
+                  f"(見 KNOWN_UNREBUILDABLE)")
     if mismatches:
         by_tf = {}
         for m in mismatches:
@@ -285,6 +308,7 @@ def main():
                        "elapsed_s": round(el, 1), "symbols": symbols, "tfs": tfs,
                        "mismatches": mismatches, "errors": errors,
                        "tolerated_float_only": tolerated, "rel_tol": a.rel_tol,
+                       "known_unrebuildable_hits": known_hits,
                        "archive_root": ARCHIVE_ROOT, "cache_root": CACHE_ROOT,
                        "generated": dt.datetime.now().isoformat(timespec="seconds")},
                       fh, ensure_ascii=False, indent=2)
