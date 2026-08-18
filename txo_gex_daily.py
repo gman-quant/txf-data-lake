@@ -1013,7 +1013,8 @@ def _scale_panel(gex, meta):
                 + ("目前隱含<b>高於</b>近期已實現" if vrp > 0 else "目前隱含<b>低於</b>近期已實現")
                 + ";僅供對照。歷史 VRP(變異數交換率 vs 同視窗已實現,2,236 觀測):"
                 "中位 <b>+3.16 vol 點</b>、>0 佔 <b>67.5%</b>。</p>")
-    return warn + f"<div class='panel'>{head}{tbl}{note}</div>", iv
+    info = {"iv": iv, "pct": pct, "hv": hv, "d1": iv * math.sqrt(1/252.0) * F}
+    return warn + f"<div class='panel'>{head}{tbl}{note}</div>", info
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
@@ -1252,8 +1253,32 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                     f" · 現價到 flip {_terr:.2f}%")
 
     # ── 結算區間 ─────────────────────────────────────────────────────
-    scale_html, _ = _scale_panel(gex, meta)
+    scale_html, _si = _scale_panel(gex, meta)
     recent_html, _rmed = _recent_table(d)
+    # ── 三張決策卡的值 ────────────────────────────────────────────
+    if _si:
+        _iv, _pc, _d1 = _si["iv"], _si.get("pct"), _si["d1"]
+        iv_v = f"{_iv:.1%}"
+        iv_cls = "neg" if (_pc is not None and _pc >= 90) else ("warn" if (_pc is not None and _pc >= 75) else "pos")
+        iv_sub = ((f"歷史第 <b>{_pc:.0f}</b> 百分位 · " if _pc is not None else "")
+                  + ("<b>高波動體制,縮部位</b>" if (_pc is not None and _pc >= 90)
+                     else "偏高,留意停損寬度" if (_pc is not None and _pc >= 75)
+                     else "常態區間"))
+        d1_v = f"{_d1*10:,.0f} 元"
+        d1_sub = (f"&plusmn;{_d1:,.0f} 點 · 小台 {_d1*50:,.0f} · 大台 {_d1*200:,.0f}"
+                  "<br>停損設在此值之內 = 停在噪音帶裡")
+    else:
+        iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
+    if _rmed is not None:
+        rm_v = f"{_rmed:.2f}"
+        rm_cls = "pos" if _rmed < 0.7 else ("neg" if _rmed > 1.0 else "mut")
+        rm_sub = ("近 10 日「實際 &divide; 定價 1&sigma;」中位(理論 0.67)<br>"
+                  + ("定價<b>偏寬</b> → 賣方相對有利" if _rmed < 0.7
+                     else "定價<b>偏窄</b> → 買方相對有利" if _rmed > 1.0
+                     else "定價與實際相符"))
+    else:
+        rm_v, rm_cls, rm_sub = "N/A", "mut", "資料不足"
+
     _sts = gex.get("settles") or []
     settle_svg = _svg_settle_bands(_sts, meta.get("fut_front", 0))
     settle_html = ""
@@ -1360,18 +1385,23 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">TXF 近月(結算價)</div><div class="v">{meta.get('fut_front',0):,.0f}</div>
 <div class="n">TAIEX 現貨 {S:,.0f}(基差 {basis:+.0f})</div></div>
 
-<div class="card"><div class="n">Gamma Flip</div><div class="v warn">{f'{flip:,.0f}' if flip else 'N/A'}</div>
-<div class="n">現價 {dist_txt} · {dist_sub}</div></div>
+<div class="card"><div class="n">今日波動水位</div><div class="v {iv_cls}">{iv_v}</div>
+<div class="n">{iv_sub}</div></div>
 
-<div class="card"><div class="n">GEX+ Flip 與 β 敏感度</div><div class="v {beta_cls}">{gp_disp}</div>
-<div class="n">{beta_sub}</div></div>
+<div class="card"><div class="n">一日 1&sigma;(微台 1 口)</div><div class="v">{d1_v}</div>
+<div class="n">{d1_sub}</div></div>
 
-<div class="card"><div class="n">VEX 最深履約價</div><div class="v">{vex_deep_v}</div>
-<div class="n">{vex_deep_sub}</div></div>
-
-<div class="card"><div class="n">flip 距離(以一日隱含波動為尺)</div>
-<div class="v {read_cls}">{read_v}</div><div class="n">{read_sub}</div></div>
+<div class="card"><div class="n">近期定價準不準</div><div class="v {rm_cls}">{rm_v}</div>
+<div class="n">{rm_sub}</div></div>
 </div>
+<div class="panel" style="border-color:#3a4553">
+<b style="font-size:18px">怎麼看(三步,依可靠度排序)</b>
+<div style="margin-top:8px;font-size:16px;line-height:1.9">
+<b>1. 波動水位</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。P90 以上就縮手,不要猜方向。<br>
+<b>2. 結算區間</b> &rarr; 決定<b>目標可行性</b>;要賣選擇權就賣在區間外。<br>
+<b>3. 結構觀察</b> &rarr; <span class="mut">只當背景。符號約 3/4 的日子是錯的、牆在價格空間不存在,
+別拿它決定進出場。</span>
+</div></div>
 <h2>① 今日尺度 <span class="mut">— 部位規模 / 停損寬度 / 目標可行性</span></h2>
 <p class="mut">用近月 IV 換算各視窗的 1&sigma; 移動。<b>選這個尺而不是 ATR</b>:實測與實際位移的相關
 IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
@@ -1393,6 +1423,19 @@ IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
 {settle_html}
 
 <h2>③ 結構觀察 <span class="mut">— 以下皆為參考,不是決策輸入</span></h2>
+<div class="cards">
+<div class="card"><div class="n">Gamma Flip</div><div class="v warn">{f'{flip:,.0f}' if flip else 'N/A'}</div>
+<div class="n">現價 {dist_txt} · {dist_sub}</div></div>
+
+<div class="card"><div class="n">GEX+ Flip 與 β 敏感度</div><div class="v {beta_cls}">{gp_disp}</div>
+<div class="n">{beta_sub}</div></div>
+
+<div class="card"><div class="n">VEX 最深履約價</div><div class="v">{vex_deep_v}</div>
+<div class="n">{vex_deep_sub}</div></div>
+
+<div class="card"><div class="n">flip 距離(以一日隱含波動為尺)</div>
+<div class="v {read_cls}">{read_v}</div><div class="n">{read_sub}</div></div>
+</div>
 {plain_svg}
 <div class="panel">{plain_sent}</div>
 {pct_line}
