@@ -38,7 +38,7 @@ import os
 import urllib.request
 from typing import Dict, List, Optional, Tuple
 
-from config.settings import DATA_ROOT
+from config.settings import CACHE_ROOT, DATA_ROOT
 
 ADJ_DIR = os.path.join(DATA_ROOT, "adjustments")
 CALENDAR_CSV = os.path.join(ADJ_DIR, "settlement_calendar.csv")
@@ -255,7 +255,7 @@ def verify_settlement_traded(cal: Dict[str, dict], log, lookback_days: int = 10)
         if not (lo <= d <= today):
             continue
         stats["checked"] += 1
-        hits = glob.glob(os.path.join(DATA_ROOT, "kbars", "1m", "TXF", str(d.year),
+        hits = glob.glob(os.path.join(CACHE_ROOT, "1m", "TXF", str(d.year),
                                       f"{iso}_TXF_1m.parquet"))
         if not hits:
             log(f"  ⏳ 結算日 {iso} 尚無 1m 檔(今日 ETL 未跑?)—— 待下次確認")

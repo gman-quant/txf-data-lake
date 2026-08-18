@@ -29,7 +29,7 @@ from datetime import datetime
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.settings import DATA_ROOT, TIMEFRAMES          # noqa: E402
+from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES          # noqa: E402
 from core.resampler import resample_to_kbars               # noqa: E402
 
 BACKUP_ROOT = os.path.join(DATA_ROOT, "repair_backup_20260815")
@@ -149,7 +149,7 @@ def do_rebuild(skip_0106: bool) -> int:
                     for r in new.to_dicts():
                         oned_rows[(r["date"], r["session"])] = r
                     continue
-                kp = os.path.join(DATA_ROOT, "kbars", tf, sym, d[:4],
+                kp = os.path.join(CACHE_ROOT, tf, sym, d[:4],
                                   f"{d}_{sym}_{tf}.parquet")
                 if not os.path.exists(kp):
                     print(f"[rebuild] ❌ 湖檔不存在:{kp}")
@@ -165,7 +165,7 @@ def do_rebuild(skip_0106: bool) -> int:
         for (dt_, sess), r in oned_rows.items():
             by_year.setdefault(dt_.year, {})[(dt_, sess)] = r
         for yr, rows in sorted(by_year.items()):
-            yf = os.path.join(DATA_ROOT, "kbars", "1d", sym, f"{sym}_1d_{yr}.parquet")
+            yf = os.path.join(CACHE_ROOT, "1d", sym, f"{sym}_1d_{yr}.parquet")
             if not os.path.exists(yf):
                 print(f"[rebuild] ❌ 年檔不存在:{yf}")
                 return 1

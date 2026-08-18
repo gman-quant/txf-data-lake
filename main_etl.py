@@ -8,7 +8,7 @@ from datetime import datetime
 import polars as pl
 
 # 引入我們寫好的模組
-from config.settings import DATA_ROOT, TIMEFRAMES
+from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES
 from adapters.shioaji_source import ShioajiSource
 from core.resampler import resample_to_kbars
 
@@ -195,7 +195,7 @@ def _process_symbol(symbol, date_str, year, month, source):
                 # [分流儲存策略] 根據週期決定儲存策略
                 # Case A: 日線 (1d) -> 存成「年檔」，使用 Append 模式
                 if tf == '1d':
-                    kbar_dir = os.path.join(DATA_ROOT, "kbars", tf, symbol)
+                    kbar_dir = os.path.join(CACHE_ROOT, tf, symbol)
                     os.makedirs(kbar_dir, exist_ok=True)
                     
                     # 檔名: TXF_1d_2025.parquet
@@ -238,7 +238,7 @@ def _process_symbol(symbol, date_str, year, month, source):
 
                 # Case B: 分時/分秒 (1m, 5s...) -> 存成「日檔」，直接覆蓋
                 else:
-                    kbar_dir = os.path.join(DATA_ROOT, "kbars", tf, symbol, year)
+                    kbar_dir = os.path.join(CACHE_ROOT, tf, symbol, year)
                     os.makedirs(kbar_dir, exist_ok=True)
                     
                     save_path = os.path.join(kbar_dir, f"{date_str}_{symbol}_{tf}.parquet")

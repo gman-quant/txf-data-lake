@@ -36,7 +36,7 @@ import time
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.settings import DATA_ROOT, TIMEFRAMES          # noqa: E402
+from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES          # noqa: E402
 from core.resampler import resample_to_kbars               # noqa: E402
 
 OLD_COLS = ["symbol", "date", "ts", "session",
@@ -84,7 +84,7 @@ def _graft(old: pl.DataFrame, pt: list, dur: list) -> pl.DataFrame:
 
 
 def run(symbols, dry_run: bool) -> int:
-    kbars_root = os.path.join(DATA_ROOT, "kbars")
+    kbars_root = CACHE_ROOT
     backup = os.path.join(DATA_ROOT, "kbars_backup_pre_ptsum")
     if not dry_run:
         if not os.path.exists(backup):

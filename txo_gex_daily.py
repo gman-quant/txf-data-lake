@@ -26,9 +26,11 @@ import polars as pl
 
 # 2026-08-17:本檔原本**繞過自家 config/settings** 自己寫死一份路徑 ——
 # 兩處分歧的話沒有任何東西會警告。改走 vendored 正典。
-from config.lake_paths import ARCHIVE_ROOT
+from config.lake_paths import ARCHIVE_ROOT, CACHE_ROOT
 
 DATA_ROOT = Path(ARCHIVE_ROOT)
+# kbars 屬 **cache**(可能在別的磁碟),不在 ARCHIVE_ROOT 底下。
+CACHE_ROOT_P = Path(CACHE_ROOT)
 TXO_ROOT = DATA_ROOT / "txo"
 UA = {"User-Agent": "Mozilla/5.0"}
 MULT = 50.0  # TXO 每點 NT$50
@@ -140,7 +142,7 @@ def trading_days():
     global _TRADING_DAYS
     if _TRADING_DAYS is None:
         s = set()
-        p = DATA_ROOT / "kbars" / "1d" / "TXF"
+        p = CACHE_ROOT_P / "1d" / "TXF"
         if p.exists():
             for f in sorted(p.glob("*.parquet")):
                 try:
@@ -229,7 +231,7 @@ def num(s):
 
 def taiex_close(d):
     """從資料湖取 TAIEX 日盤收盤(TXO 的真正標的)。取不到回 None。"""
-    p = DATA_ROOT / "kbars" / "1d" / "TSE" / f"TSE_1d_{d.year}.parquet"
+    p = CACHE_ROOT_P / "1d" / "TSE" / f"TSE_1d_{d.year}.parquet"
     if not p.exists():
         return None
     try:
@@ -727,7 +729,7 @@ def percentiles(d, gex, lookback=60):
 def atr_txf(d, n=14):
     """TXF 交易日 ATR(日盤+當晚夜盤 合併為一根)—— 把 flip 距離換算成「幾個波動單位」。
     絕對點數在不同價格水準/波動體制間不可比,除以 ATR 才有跨日意義。"""
-    p = DATA_ROOT / "kbars" / "1d" / "TXF" / f"TXF_1d_{d.year}.parquet"
+    p = CACHE_ROOT_P / "1d" / "TXF" / f"TXF_1d_{d.year}.parquet"
     if not p.exists():
         return None
     try:
@@ -750,7 +752,7 @@ def map_window_bars(m_date, eval_date):
     ⚠ 湖的夜盤以「起始日」標記(date=7/23 Night 的 ts 是 7/23 15:00 → 7/24 04:55),
     所以視窗要跨兩個 date 標籤取,不能用單一 date 的 Day+Night(那會漏掉前一晚、多算後一晚)。"""
     def rows(dt, sess):
-        p = DATA_ROOT / "kbars" / "1d" / "TXF" / f"TXF_1d_{dt.year}.parquet"
+        p = CACHE_ROOT_P / "1d" / "TXF" / f"TXF_1d_{dt.year}.parquet"
         if not p.exists():
             return None
         try:
@@ -971,7 +973,7 @@ def _scale_panel(gex, meta):
     except Exception:
         pass
     try:
-        tse = (pl.read_parquet(sorted(glob.glob(str(DATA_ROOT / "kbars" / "1d" / "TSE" / "*.parquet"))))
+        tse = (pl.read_parquet(sorted(glob.glob(str(CACHE_ROOT_P / "1d" / "TSE" / "*.parquet"))))
                .filter(pl.col("session") == "Day").select(["date", "close"])
                .unique(subset=["date"]).sort("date").tail(21))
         c = tse["close"].to_numpy()
@@ -1518,7 +1520,7 @@ def _lake_has_trading_day(d):
     國定假日/颱風假則因 main_etl 的幻影守衛而不會有檔。這是現成、零成本的休市判別,
     不必再維護一份 TAIFEX 日曆(與 data-ops「假日免維護」同一個機制)。
     """
-    p = DATA_ROOT / "kbars" / "5m" / "TXF" / str(d.year) / f"{d}_TXF_5m.parquet"
+    p = CACHE_ROOT_P / "5m" / "TXF" / str(d.year) / f"{d}_TXF_5m.parquet"
     return p.exists()
 
 

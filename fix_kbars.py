@@ -1,7 +1,7 @@
 import os
 import glob
 import polars as pl
-from config.settings import DATA_ROOT, TIMEFRAMES
+from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES
 from core.resampler import resample_to_kbars
 
 def run_fix():
@@ -40,7 +40,7 @@ def run_fix():
                 continue
                 
             # 分時線路徑邏輯 (同 main_etl.py)
-            kbar_dir = os.path.join(DATA_ROOT, "kbars", tf, symbol, year)
+            kbar_dir = os.path.join(CACHE_ROOT, tf, symbol, year)
             os.makedirs(kbar_dir, exist_ok=True)
             save_path = os.path.join(kbar_dir, f"{date_str}_{symbol}_{tf}.parquet")
             

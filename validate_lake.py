@@ -29,7 +29,7 @@ except Exception:
 
 import polars as pl
 
-from config.settings import DATA_ROOT, TIMEFRAMES
+from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES
 from config.calendar_rules import DAY_START, DAY_END
 
 TARGET_SYMBOLS = ["TXF", "TSE", "TXFR2"]
@@ -95,9 +95,9 @@ def _files_for_date(date_str: str) -> list[str]:
     for sym in TARGET_SYMBOLS:
         for tf in TIMEFRAMES:
             if tf == "1d":
-                p = os.path.join(DATA_ROOT, "kbars", tf, sym, f"{sym}_{tf}_{year}.parquet")
+                p = os.path.join(CACHE_ROOT, tf, sym, f"{sym}_{tf}_{year}.parquet")
             else:
-                p = os.path.join(DATA_ROOT, "kbars", tf, sym, year, f"{date_str}_{sym}_{tf}.parquet")
+                p = os.path.join(CACHE_ROOT, tf, sym, year, f"{date_str}_{sym}_{tf}.parquet")
             if os.path.exists(p):
                 paths.append(p)
     return paths
@@ -106,8 +106,8 @@ def _files_for_date(date_str: str) -> list[str]:
 def _all_kbar_files() -> list[str]:
     return [
         os.path.normpath(p)
-        for p in glob.glob(os.path.join(DATA_ROOT, "kbars", "*", "*", "*", "*.parquet"))
-        + glob.glob(os.path.join(DATA_ROOT, "kbars", "1d", "*", "*.parquet"))
+        for p in glob.glob(os.path.join(CACHE_ROOT, "*", "*", "*", "*.parquet"))
+        + glob.glob(os.path.join(CACHE_ROOT, "1d", "*", "*.parquet"))
         if "_sunday_backup" not in p and "_backup" not in p
     ]
 
@@ -124,7 +124,7 @@ def _check_completeness(date_str: str) -> list[str]:
     """
     year = date_str[:4]
     def has(sym):
-        return os.path.exists(os.path.join(DATA_ROOT, "kbars", "5m", sym, year,
+        return os.path.exists(os.path.join(CACHE_ROOT, "5m", sym, year,
                                            f"{date_str}_{sym}_5m.parquet"))
     if not has("TXF"):
         return []                     # 無基準:非交易日或整日沒跑,交給既有流程判斷
@@ -134,7 +134,7 @@ def _check_completeness(date_str: str) -> list[str]:
     # TSE 例外:股市休市但期貨有夜盤的日子(TXF 只有夜盤)本來就沒有 TAIEX,不算缺
     try:
         import polars as pl
-        df = pl.read_parquet(os.path.join(DATA_ROOT, "kbars", "5m", "TXF", year,
+        df = pl.read_parquet(os.path.join(CACHE_ROOT, "5m", "TXF", year,
                                           f"{date_str}_TXF_5m.parquet"))
         day_only_night = "session" in df.columns and df.filter(
             pl.col("session") == "Day").height == 0
