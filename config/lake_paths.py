@@ -79,18 +79,66 @@ class LakePathError(RuntimeError):
 _DEFAULT_ARCHIVE_ROOT = "D:/txf-data"
 
 
+def _norm(p):
+    return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
+
+
+def _registry_value(name):
+    """讀 Windows **使用者環境變數的登錄檔值**(HKCU 的 Environment 鍵)。
+
+    非 Windows / 沒設過 / 讀不到 → None。
+
+    ⚠️ 刻意抽成獨立函式,為的是**讓測試替換得掉** —— 否則「不設環境變數時退回
+    出廠預設」那條測試,在真的設過變數的機器上會讀到登錄檔而失敗。
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None                       # 非 Windows
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            v, _ = winreg.QueryValueEx(k, name)
+    except OSError:
+        return None                       # 沒這個值
+    return v or None
+
+
 def _resolve(env_names, default):
-    """依序試環境變數,都沒有就用 default。**不碰檔案系統**(見 require_roots)。
+    """依序試 行程環境 → 登錄檔 → default。**不碰檔案系統**(見 require_roots)。
+
+    ## 為什麼要有「登錄檔」這一層(2026-08-18 事故後加)
+
+    Windows 的環境變數是**行程建立時複製一份**,不是隨時去查。改了使用者變數之後:
+
+        登錄檔(HKCU 的 Environment)  ← 立刻更新,這是**宣告**
+        已在跑的行程                  ← 手上還是舊副本
+        它們生出來的新行程            ← 繼承的也是舊副本
+
+    2026-08-18 實例:`explorer.exe` 啟動於 08-17 07:46,而變數是當天 19:45 設的
+    ⇒ **從工作列開的每一個「新」視窗都拿不到**,viewer 因此讀了舊的湖位置,
+    而在加開機橫幅之前完全沒有徵兆。同一天稍早也誤判過一次(以為工作排程拿不到,
+    其實它每次觸發都重讀,拿得到)。**兩次都是「靠繼承」出事。**
+
+    所以:**登錄檔是宣告的真相,行程環境只是一份可能過期的副本** ——
+    沒有副本時就去問真相。精神同本工作區既有的 UTF-8 那條
+    (「在碼裡強制,不靠 shell 繼承」)與 `daily_sync._child_env()`。
+
+    ⚠️ **語意副作用**:`unset TXF_CACHE_ROOT` 之後**不再等於「用出廠預設」** ——
+    登錄檔那層仍會生效。要真的取出廠預設,請**明確把變數設成那個值**。
 
     為什麼 import 時不做存在檢查:這個模組會被測試、CI、以及沒有掛湖的機器 import。
     import 就炸會讓「跑測試」變成「必須先有一個 3 GB 的湖」。存在檢查改在**用的時候**做
     —— 那正是錯誤該出現的位置。
     """
-    for name in env_names:
+    for name in env_names:                # ① 行程環境:明確覆寫,最高優先
         v = os.environ.get(name)
         if v:
-            return os.path.abspath(os.path.expanduser(v))
-    return os.path.abspath(default)
+            return _norm(v)
+    for name in env_names:                # ② 登錄檔:機器上宣告的設定
+        v = _registry_value(name)
+        if v:
+            return _norm(v)
+    return _norm(default)                 # ③ 出廠預設
 
 
 #: 來源真值的根。`DATA_ROOT` 是 txf-data-lake 沿用已久的名字,保留為**過渡期別名**。
