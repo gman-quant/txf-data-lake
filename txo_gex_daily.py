@@ -893,6 +893,60 @@ def _plain_map(gex, fut_front, atr=None, w=880, h=250):
     return svg, sent
 
 
+def _recent_table(d, n=10):
+    """近 N 個交易日:實際變動 vs 當時定價的 1σ。
+
+    這是報表唯一**檢查自己準不準**的區塊 ——
+      · 「實際/1σ」持續 <1 → 市場定價偏寬(賣方相對有利)
+      · 持續 >1           → 定價偏窄(買方相對有利)
+    比任何靜態統計都即時,因為它用的就是每天當下的定價。
+    """
+    p = TXO_ROOT / "daily_summary.parquet"
+    if not p.exists():
+        return "", None
+    s = pl.read_parquet(p).sort("date")
+    if "front_iv" not in s.columns:
+        return "", None
+    hist = s.filter(pl.col("front_iv").is_not_null())["front_iv"].to_numpy()
+    s = s.filter(pl.col("date") <= str(d)).tail(n + 1)
+    r = s.to_dicts()
+    if len(r) < 3:
+        return "", None
+    rows, zs = "", []
+    for i in range(1, len(r)):
+        a, b = r[i - 1], r[i]
+        if not (a.get("day_move_pts") and b.get("fut_front") and a.get("fut_front")):
+            continue
+        ch = b["fut_front"] - a["fut_front"]
+        z = abs(ch) / a["day_move_pts"]
+        zs.append(z)
+        iv = b.get("front_iv")
+        pc = float((hist < iv).mean() * 100) if iv is not None and len(hist) >= 30 else None
+        hot = " style='color:#ef5350;font-weight:bold'" if (pc is not None and pc >= 90) else ""
+        big = " style='color:#f5d90a;font-weight:bold'" if z >= 2 else ""
+        rows += (f"<tr><td>{b['date'][5:]}</td>"
+                 f"<td style='text-align:right'>{b['fut_front']:,.0f}</td>"
+                 f"<td style='text-align:right'>{ch:+,.0f}</td>"
+                 f"<td style='text-align:right'>{ch/a['fut_front']*100:+.2f}%</td>"
+                 f"<td style='text-align:right'{hot}>{iv:.1%}</td>"
+                 f"<td style='text-align:right'{hot}>{('P%.0f' % pc) if pc is not None else '—'}</td>"
+                 f"<td style='text-align:right'>{a['day_move_pts']:,.0f}</td>"
+                 f"<td style='text-align:right'{big}>{z:.2f}&sigma;</td></tr>")
+    if not zs:
+        return "", None
+    med = float(np.median(zs))
+    tone = ("定價<b>偏寬</b>,近期實際波動小於市場所定的價(賣方相對有利)" if med < 0.7
+            else "定價<b>偏窄</b>,近期實際波動大於市場所定的價(買方相對有利)" if med > 1.0
+            else "定價與實際大致相符")
+    html = ("<table><tr><th>日期</th><th>TXF 收</th><th>變動</th><th>%</th>"
+            "<th>近月 IV</th><th>百分位</th><th>當日定價 1&sigma;</th><th>實際/1&sigma;</th></tr>"
+            + rows + "</table>"
+            + f"<p class='mut' style='margin:6px 0 0'>近 {len(zs)} 日「實際/1&sigma;」中位 "
+              f"<b>{med:.2f}</b>(常態理論 0.67)&rarr; {tone}。"
+              "<br>紅字 = IV 在歷史 P90 以上;黃字 = 當日變動 &ge; 2&sigma;。</p>")
+    return html, med
+
+
 def _scale_panel(gex, meta):
     """今日尺度:把 IV 換成「各視窗的 1σ 移動」與「小台/大台的金額」。
     這是報表裡唯一四題全過的東西(改變決策 / 贏對照組 / 獨立 / 適用):
@@ -934,6 +988,17 @@ def _scale_panel(gex, meta):
                  f"<td style='text-align:right'>{pts*50:,.0f}</td>"
                  f"<td style='text-align:right'>{pts*200:,.0f}</td></tr>")
     vrp = (iv - hv) if hv else None
+    warn = ""
+    if pct is not None and pct >= 90:
+        warn = ("<div class='panel' style='border-color:#ef5350;background:#2a1618'>"
+                "<span class='neg' style='font-size:19px'><b>⚠️ IV 在歷史 P"
+                f"{pct:.0f} —— 高波動體制</b></span>"
+                "<div style='margin-top:6px;font-size:16px'>實測:IV 最高 10% 的日子,"
+                "隔日 |變動| 中位 <b>1.63%</b>、P90 <b>4.53%</b>(vs 最低 25% 的 0.55% / 1.58%)。"
+                "<br><b>該做的三件事都不需要預測方向:</b>"
+                "① <b>縮小部位</b>(下表的金額就是今天一口的日波動)"
+                "② <b>停損放寬或退場</b>(平常的寬度在這種水位必被洗掉)"
+                "③ <b>此時賣選擇權最危險</b> —— 權利金最肥,但左尾也最肥</div></div>")
     head = (f"近月 ATM IV <b>{iv:.1%}</b>"
             + (f" · 歷史第 <b>{pct:.0f}</b> 百分位" if pct is not None else "")
             + (f" · 近 20 日已實現 {hv:.1%} · <b>差 {vrp:+.1%}</b>" if hv else ""))
@@ -947,7 +1012,7 @@ def _scale_panel(gex, meta):
                 + ("目前隱含<b>高於</b>近期已實現" if vrp > 0 else "目前隱含<b>低於</b>近期已實現")
                 + ";僅供對照。歷史 VRP(變異數交換率 vs 同視窗已實現,2,236 觀測):"
                 "中位 <b>+3.16 vol 點</b>、>0 佔 <b>67.5%</b>。</p>")
-    return f"<div class='panel'>{head}{tbl}{note}</div>", iv
+    return warn + f"<div class='panel'>{head}{tbl}{note}</div>", iv
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
@@ -1187,6 +1252,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
 
     # ── 結算區間 ─────────────────────────────────────────────────────
     scale_html, _ = _scale_panel(gex, meta)
+    recent_html, _rmed = _recent_table(d)
     _sts = gex.get("settles") or []
     settle_svg = _svg_settle_bands(_sts, meta.get("fut_front", 0))
     settle_html = ""
@@ -1304,6 +1370,11 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
 <b>停損若設在 1&sigma; 之內,等於停在噪音帶裡</b>;目標若設在區間之外,達成機率很低。</p>
 {scale_html}
+
+<h3>近 10 日:實際波動 vs 當時的定價</h3>
+<p class="mut">這是報表<b>唯一會檢查自己準不準</b>的區塊。「實際/1&sigma;」持續 &lt;1 代表市場定價偏寬、
+&gt;1 代表偏窄 —— 比任何靜態統計都即時,因為它用的就是每天當下的定價。</p>
+{recent_html}
 
 <h2>② 結算價會落在哪 <span class="mut">(最近三個到期)</span></h2>
 <p class="mut">深色帶 = <b>±0.8&sigma;,約 67% 的結算落在裡面</b>;淺色帶 = ±1.0&sigma;,約 82%。
