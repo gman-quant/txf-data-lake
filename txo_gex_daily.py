@@ -912,7 +912,7 @@ def _recent_table(d, n=10):
     r = s.to_dicts()
     if len(r) < 3:
         return "", None
-    rows, zs = "", []
+    _rows, zs = [], []
     for i in range(1, len(r)):
         a, b = r[i - 1], r[i]
         if not (a.get("day_move_pts") and b.get("fut_front") and a.get("fut_front")):
@@ -924,7 +924,7 @@ def _recent_table(d, n=10):
         pc = float((hist < iv).mean() * 100) if iv is not None and len(hist) >= 30 else None
         hot = " style='color:#ef5350;font-weight:bold'" if (pc is not None and pc >= 90) else ""
         big = " style='color:#f5d90a;font-weight:bold'" if z >= 2 else ""
-        rows += (f"<tr><td>{b['date'][5:]}</td>"
+        _rows.append(f"<tr><td>{b['date'][5:]}</td>"
                  f"<td style='text-align:right'>{b['fut_front']:,.0f}</td>"
                  f"<td style='text-align:right'>{ch:+,.0f}</td>"
                  f"<td style='text-align:right'>{ch/a['fut_front']*100:+.2f}%</td>"
@@ -932,6 +932,7 @@ def _recent_table(d, n=10):
                  f"<td style='text-align:right'{hot}>{('P%.0f' % pc) if pc is not None else '—'}</td>"
                  f"<td style='text-align:right'>{a['day_move_pts']:,.0f}</td>"
                  f"<td style='text-align:right'{big}>{z:.2f}&sigma;</td></tr>")
+    rows = "".join(reversed(_rows))          # 最新的排最上面
     if not zs:
         return "", None
     med = float(np.median(zs))
@@ -1333,6 +1334,12 @@ h2{{font-size:21px;margin:28px 0 10px;border-left:4px solid #f5d90a;padding-left
 .pos{{color:#26a69a}} .neg{{color:#ef5350}} .warn{{color:#f5d90a}}
 svg{{width:100%;height:auto;background:#0b0e13;border:1px solid #2a313c;border-radius:8px}}
 .panel{{background:#161b22;border:1px solid #2a313c;border-radius:10px;padding:12px 18px;margin:12px 0;font-size:17px}}
+table{{border-collapse:collapse;width:100%;margin:10px 0;font-size:16px}}
+th{{text-align:left;padding:9px 14px;border-bottom:1px solid #3a4553;color:#9aa3ad;
+   font-weight:600;font-size:14px;white-space:nowrap}}
+td{{padding:9px 14px;border-bottom:1px solid #1c222b;white-space:nowrap}}
+tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
+.panel table{{margin:6px 0 0}}
 .grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0}}
 @media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}
 .cell{{background:#0f1620;border:1px solid #2a313c;border-radius:10px;padding:10px 12px}}
