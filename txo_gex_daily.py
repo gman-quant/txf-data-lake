@@ -980,6 +980,12 @@ def _scale_panel(gex, meta):
             hv = float(r.std() * math.sqrt(252))
     except Exception:
         pass
+    # 停損寬度對照:單邊最大不利偏移 ÷ 定價 1σ 的實測分布
+    #   (632 天 × 多空兩邊 = 1,264 個觀測;用前一日定價的 σ)
+    #   ⚠ 1σ 量的是**收盤到收盤**;停損被掃到看的是**盤中單邊偏移**,兩者不同。
+    #   實測:當日高低振幅中位是收盤變動的 1.92 倍(布朗理論僅 1.60 —— 台指跑日夜兩盤)。
+    STOP = [(0.50, 55.2), (0.75, 38.1), (1.00, 25.6), (1.25, 16.1),
+            (1.50, 10.1), (2.00, 3.8), (2.50, 1.5)]
     WIN = [("1 小時", 1 / (252 * 5.0)), ("1 交易日", 1 / 252.0), ("1 週(5 日)", 5 / 252.0)]
     rows = ""
     for lab, T in WIN:
@@ -1006,6 +1012,18 @@ def _scale_panel(gex, meta):
     tbl = ("<table><tr><th>視窗</th><th>1&sigma; 移動</th>"
            "<th>微台 TMF 1 口(元)</th><th>小台 MXF 1 口(元)</th>"
            "<th>大台 TXF 1 口(元)</th></tr>" + rows + "</table>")
+    d1 = iv * math.sqrt(1 / 252.0) * F
+    srow = "".join(
+        f"<tr><td>{k:.2f}&sigma;</td>"
+        f"<td style='text-align:right'><b>{k*d1:,.0f} 點</b></td>"
+        f"<td style='text-align:right'>{k*d1*10:,.0f}</td>"
+        f"<td style='text-align:right'{' style=color:#ef5350' if pc>40 else ''}>{pc:.1f}%</td></tr>"
+        for k, pc in STOP)
+    tbl += ("<p class='mut' style='margin:12px 0 4px'><b>停損寬度對照</b>(632 天 &times; 多空兩邊 "
+            "= 1,264 個觀測)—— <b>1&sigma; 量的是收盤到收盤,但停損被掃到看的是盤中單邊偏移</b>。"
+            "實測當日高低振幅中位是收盤變動的 <b>1.92 倍</b>。</p>"
+            "<table><tr><th>停損寬度</th><th>今日對應點數</th><th>微台風險(元)</th>"
+            "<th>當日被掃到的機率</th></tr>" + srow + "</table>")
     note = ""
     if vrp is not None:
         note = ("<p class='mut' style='margin:6px 0 0'>⚠️ 這是 <b>IV &minus; 近 20 日已實現</b>,"
@@ -1266,7 +1284,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                      else "常態區間"))
         d1_v = f"{_d1*10:,.0f} 元"
         d1_sub = (f"&plusmn;{_d1:,.0f} 點 · 小台 {_d1*50:,.0f} · 大台 {_d1*200:,.0f}"
-                  "<br>停損設在此值之內 = 停在噪音帶裡")
+                  "<br>停損設 1&sigma; → 當日 <b>25.6%</b> 機率被掃到(見下表)")
     else:
         iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
     if _rmed is not None:
