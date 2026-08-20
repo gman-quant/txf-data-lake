@@ -951,19 +951,18 @@ def _recent_table(d, n=10):
 
 
 def _scale_panel(gex, meta):
-    """今日尺度:把 IV 換成「各視窗的 1σ 移動」與「小台/大台的金額」。
-    這是報表裡唯一四題全過的東西(改變決策 / 贏對照組 / 獨立 / 適用):
-      · 部位規模:一天的正常波動值多少錢
-      · 停損寬度:停在噪音帶之內就是純洗
-      · 目標可行性:超出區間的目標機率很低
-    ⚠ 用 IV 而非 ATR:實測與實際位移的相關 IV 0.714 > 20 日歷史波動 0.604 > 5 日 0.556。
+    """① 明天的區間 —— 報表唯一四題全過的區塊(改變決策/贏對照組/獨立/適用)。
+
+    校準全部來自實測(633 天,2024-01~2026-08,分母是前一日定價的 1σ):
+      隔日收盤變動   50% 需 ±0.63σ · 67% 需 ±0.92σ · 80% 需 ±1.25σ · 90% 需 ±1.72σ
+      隔日盤中極值   最高中位 +0.67σ · 最低中位 −0.54σ(各約半數日子會觸及)
+      停損單邊被掃   0.75σ→38.1% · 1.0σ→25.6% · 1.5σ→10.1% · 2.0σ→3.8%
+    ⚠ 1σ 本身是「收盤到收盤」;盤中振幅中位是它的 1.92 倍,所以停損要另一張表。
     """
-    iv = gex.get("front_iv")
-    F = meta.get("fut_front") or 0
+    iv = gex.get("front_iv"); F = meta.get("fut_front") or 0
     if not (iv and iv > 0 and F):
-        return "<p class='mut'>(近月 IV 不足,無法估尺度)</p>", None
-    # IV 的歷史百分位(用 daily_summary 累積的 front_iv,零成本)
-    pct = hv = None
+        return "<p class='mut'>(近月 IV 不足,無法估區間)</p>", None
+    pct = None
     try:
         s = pl.read_parquet(TXO_ROOT / "daily_summary.parquet")
         if "front_iv" in s.columns:
@@ -972,69 +971,48 @@ def _scale_panel(gex, meta):
                 pct = float((h < iv).mean() * 100)
     except Exception:
         pass
-    try:
-        tse = (pl.read_parquet(sorted(glob.glob(str(CACHE_ROOT_P / "1d" / "TSE" / "*.parquet"))))
-               .filter(pl.col("session") == "Day").select(["date", "close"])
-               .unique(subset=["date"]).sort("date").tail(21))
-        c = tse["close"].to_numpy()
-        if len(c) >= 21:
-            r = np.diff(np.log(c))
-            hv = float(r.std() * math.sqrt(252))
-    except Exception:
-        pass
-    # 停損寬度對照:單邊最大不利偏移 ÷ 定價 1σ 的實測分布
-    #   (632 天 × 多空兩邊 = 1,264 個觀測;用前一日定價的 σ)
-    #   ⚠ 1σ 量的是**收盤到收盤**;停損被掃到看的是**盤中單邊偏移**,兩者不同。
-    #   實測:當日高低振幅中位是收盤變動的 1.92 倍(布朗理論僅 1.60 —— 台指跑日夜兩盤)。
-    STOP = [(0.50, 55.2), (0.75, 38.1), (1.00, 25.6), (1.25, 16.1),
-            (1.50, 10.1), (2.00, 3.8), (2.50, 1.5)]
-    WIN = [("1 小時", 1 / (252 * 5.0)), ("1 交易日", 1 / 252.0), ("1 週(5 日)", 5 / 252.0)]
-    rows = ""
-    for lab, T in WIN:
-        pts = iv * math.sqrt(T) * F
-        rows += (f"<tr><td>{lab}</td><td style='text-align:right'><b>&plusmn;{pts:,.0f} 點</b></td>"
-                 f"<td style='text-align:right'>{pts*10:,.0f}</td>"
-                 f"<td style='text-align:right'>{pts*50:,.0f}</td>"
-                 f"<td style='text-align:right'>{pts*200:,.0f}</td></tr>")
-    vrp = (iv - hv) if hv else None
+    d1 = iv * math.sqrt(1 / 252.0) * F
+
     warn = ""
     if pct is not None and pct >= 90:
         warn = ("<div class='panel' style='border-color:#ef5350;background:#2a1618'>"
-                "<span class='neg' style='font-size:19px'><b>⚠️ IV 在歷史 P"
-                f"{pct:.0f} —— 高波動體制</b></span>"
-                "<div style='margin-top:6px;font-size:16px'>實測:IV 最高 10% 的日子,"
-                "隔日 |變動| 中位 <b>1.63%</b>、P90 <b>4.53%</b>(vs 最低 25% 的 0.55% / 1.58%)。"
-                "<br><b>該做的三件事都不需要預測方向:</b>"
-                "① <b>縮小部位</b>(下表的金額就是今天一口的日波動)"
-                "② <b>停損放寬或退場</b>(平常的寬度在這種水位必被洗掉)"
-                "③ <b>此時賣選擇權最危險</b> —— 權利金最肥,但左尾也最肥</div></div>")
-    head = (f"近月 ATM IV <b>{iv:.1%}</b>"
-            + (f" · 歷史第 <b>{pct:.0f}</b> 百分位" if pct is not None else "")
-            + (f" · 近 20 日已實現 {hv:.1%} · <b>差 {vrp:+.1%}</b>" if hv else ""))
-    tbl = ("<table><tr><th>視窗</th><th>1&sigma; 移動</th>"
-           "<th>微台 TMF 1 口(元)</th><th>小台 MXF 1 口(元)</th>"
-           "<th>大台 TXF 1 口(元)</th></tr>" + rows + "</table>")
-    d1 = iv * math.sqrt(1 / 252.0) * F
+                f"<span class='neg' style='font-size:19px'><b>⚠️ IV 在歷史 P{pct:.0f} —— 高波動體制</b></span>"
+                "<div style='margin-top:6px;font-size:16px'>實測:IV 最高 10% 的日子,隔日 |變動| 中位 "
+                "<b>1.63%</b>、P90 <b>4.53%</b>(vs 最低 25% 的 0.55% / 1.58%)。"
+                "<br><b>縮部位、放寬或退出停損、此時賣選擇權最危險</b> —— 三件事都不必猜方向。</div></div>")
+
+    rng = ("<div class='panel'>"
+           f"<div style='font-size:15px;color:#9aa3ad'>近月 ATM IV <b style='color:#e6e8eb'>{iv:.1%}</b>"
+           + (f" · 歷史第 <b style='color:#e6e8eb'>{pct:.0f}</b> 百分位" if pct is not None else "")
+           + f" · 一日 1&sigma; = {d1:,.0f} 點</div>"
+           "<table style='margin-top:10px'>"
+           "<tr><th>明日</th><th>區間</th><th>寬度</th><th>依據</th></tr>"
+           f"<tr><td><b>收盤(67%)</b></td>"
+           f"<td style='text-align:right'><b style='font-size:19px'>{F-0.92*d1:,.0f} – {F+0.92*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>&plusmn;{0.92*d1:,.0f}</td><td class='mut'>&plusmn;0.92&sigma;</td></tr>"
+           f"<tr><td>收盤(80%)</td>"
+           f"<td style='text-align:right'>{F-1.25*d1:,.0f} – {F+1.25*d1:,.0f}</td>"
+           f"<td style='text-align:right'>&plusmn;{1.25*d1:,.0f}</td><td class='mut'>&plusmn;1.25&sigma;</td></tr>"
+           f"<tr><td><b>盤中會觸及</b></td>"
+           f"<td style='text-align:right'>低 <b>{F-0.54*d1:,.0f}</b> / 高 <b>{F+0.67*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>—</td><td class='mut'>各約半數日子</td></tr>"
+           "</table>"
+           "<p class='mut' style='margin:8px 0 0'>基準 = 今日 TXF 收盤 "
+           f"<b>{F:,.0f}</b>。校準自 633 天實測,非常態假設。</p></div>")
+
+    STOP = [(0.75, 38.1), (1.00, 25.6), (1.50, 10.1), (2.00, 3.8)]
     srow = "".join(
-        f"<tr><td>{k:.2f}&sigma;</td>"
-        f"<td style='text-align:right'><b>{k*d1:,.0f} 點</b></td>"
+        f"<tr><td>{k:.2f}&sigma;</td><td style='text-align:right'><b>{k*d1:,.0f} 點</b></td>"
         f"<td style='text-align:right'>{k*d1*10:,.0f}</td>"
-        f"<td style='text-align:right'{' style=color:#ef5350' if pc>40 else ''}>{pc:.1f}%</td></tr>"
+        f"<td style='text-align:right'>{k*d1*50:,.0f}</td>"
+        f"<td style='text-align:right'{chr(32)+chr(115)+'tyle=color:#ef5350' if pc>30 else ''}>{pc:.1f}%</td></tr>"
         for k, pc in STOP)
-    tbl += ("<p class='mut' style='margin:12px 0 4px'><b>停損寬度對照</b>(632 天 &times; 多空兩邊 "
-            "= 1,264 個觀測)—— <b>1&sigma; 量的是收盤到收盤,但停損被掃到看的是盤中單邊偏移</b>。"
-            "實測當日高低振幅中位是收盤變動的 <b>1.92 倍</b>。</p>"
-            "<table><tr><th>停損寬度</th><th>今日對應點數</th><th>微台風險(元)</th>"
-            "<th>當日被掃到的機率</th></tr>" + srow + "</table>")
-    note = ""
-    if vrp is not None:
-        note = ("<p class='mut' style='margin:6px 0 0'>⚠️ 這是 <b>IV &minus; 近 20 日已實現</b>,"
-                "<b>不是 VRP</b> —— 真正的 VRP 要跟<b>未來</b>已實現比,今天無從得知。"
-                + ("目前隱含<b>高於</b>近期已實現" if vrp > 0 else "目前隱含<b>低於</b>近期已實現")
-                + ";僅供對照。歷史 VRP(變異數交換率 vs 同視窗已實現,2,236 觀測):"
-                "中位 <b>+3.16 vol 點</b>、>0 佔 <b>67.5%</b>。</p>")
-    info = {"iv": iv, "pct": pct, "hv": hv, "d1": iv * math.sqrt(1/252.0) * F}
-    return warn + f"<div class='panel'>{head}{tbl}{note}</div>", info
+    stop = ("<div class='panel'><b>停損寬度 → 當日被掃到的機率</b>"
+            "<span class='mut' style='font-size:14px'> — 單邊最大不利偏移,633 天 &times; 多空兩邊</span>"
+            "<table><tr><th>寬度</th><th>點數</th><th>微台(元)</th><th>小台(元)</th>"
+            "<th>被掃機率</th></tr>" + srow + "</table></div>")
+    info = {"iv": iv, "pct": pct, "d1": d1, "F": F}
+    return warn + rng + stop, info
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
@@ -1284,9 +1262,11 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                   + ("<b>高波動體制,縮部位</b>" if (_pc is not None and _pc >= 90)
                      else "偏高,留意停損寬度" if (_pc is not None and _pc >= 75)
                      else "常態區間"))
-        d1_v = f"{_d1*10:,.0f} 元"
-        d1_sub = (f"&plusmn;{_d1:,.0f} 點 · 小台 {_d1*50:,.0f} · 大台 {_d1*200:,.0f}"
-                  "<br>停損設 1&sigma; → 當日 <b>25.6%</b> 機率被掃到(見下表)")
+        _F = _si["F"]
+        d1_v = f"{_F-0.92*_d1:,.0f} – {_F+0.92*_d1:,.0f}"
+        d1_sub = (f"&plusmn;{0.92*_d1:,.0f} 點 · 微台一口日風險 {_d1*10:,.0f} 元"
+                  "<br>盤中約會觸及 "
+                  f"<b>{_F-0.54*_d1:,.0f}</b> / <b>{_F+0.67*_d1:,.0f}</b>")
     else:
         iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
     if _rmed is not None:
@@ -1408,7 +1388,7 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">今日波動水位</div><div class="v {iv_cls}">{iv_v}</div>
 <div class="n">{iv_sub}</div></div>
 
-<div class="card"><div class="n">一日 1&sigma;(微台 1 口)</div><div class="v">{d1_v}</div>
+<div class="card"><div class="n">明日收盤 67% 區間</div><div class="v">{d1_v}</div>
 <div class="n">{d1_sub}</div></div>
 
 <div class="card"><div class="n">近期定價準不準</div><div class="v {rm_cls}">{rm_v}</div>
@@ -1417,15 +1397,13 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="panel" style="border-color:#3a4553">
 <b style="font-size:18px">怎麼看(三步,依可靠度排序)</b>
 <div style="margin-top:8px;font-size:16px;line-height:1.9">
-<b>1. 波動水位</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。P90 以上就縮手,不要猜方向。<br>
-<b>2. 結算區間</b> &rarr; 決定<b>目標可行性</b>;要賣選擇權就賣在區間外。<br>
+<b>1. 明天的區間</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。IV 在 P90 以上就縮手,不要猜方向。<br>
+<b>2. 結算日區間</b> &rarr; 週三/週五結算的落點;要賣選擇權就賣在區間外。<br>
 <b>3. 結構觀察</b> &rarr; <span class="mut">只當背景。符號約 3/4 的日子是錯的、牆在價格空間不存在,
 別拿它決定進出場。</span>
 </div></div>
-<h2>① 今日尺度 <span class="mut">— 部位規模 / 停損寬度 / 目標可行性</span></h2>
-<p class="mut">用近月 IV 換算各視窗的 1&sigma; 移動。<b>選這個尺而不是 ATR</b>:實測與實際位移的相關
-IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
-<b>停損若設在 1&sigma; 之內,等於停在噪音帶裡</b>;目標若設在區間之外,達成機率很低。</p>
+<h2>① 明天的區間 <span class="mut">— 部位規模 / 停損寬度</span></h2>
+
 {scale_html}
 
 <h3>近 10 日:實際波動 vs 當時的定價</h3>
@@ -1433,7 +1411,7 @@ IV <b>0.714</b> &gt; 20 日歷史波動 0.604 &gt; 5 日 0.556。<br>
 &gt;1 代表偏窄 —— 比任何靜態統計都即時,因為它用的就是每天當下的定價。</p>
 {recent_html}
 
-<h2>② 結算價會落在哪 <span class="mut">(最近三個到期)</span></h2>
+<h2>② 結算日的區間 <span class="mut">(最近三個到期)</span></h2>
 <p class="mut">深色帶 = <b>±0.8&sigma;,約 67% 的結算落在裡面</b>;淺色帶 = ±1.0&sigma;,約 82%。
 黃線 = 中心(選擇權推算的遠期價)。<br>
 校準自 2024-01~2026-08 共 173 個「剩 1 日」的週選實測(剩 3 日 79%、剩 5 日 75%)。
