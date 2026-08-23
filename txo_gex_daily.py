@@ -211,10 +211,11 @@ def iv_solve(F, K, T, price, cp):
     return 0.5 * (lo + hi)
 
 
-def gamma_of(F, K, T, iv):
-    sq = iv * math.sqrt(T)
-    d1 = (math.log(F / K) + 0.5 * iv * iv * T) / sq
-    return npdf(d1) / (F * sq)
+# ⚠️ 2026-08-23:這裡曾有 `gamma_of(F, K, T, iv)` —— 自誕生就零呼叫端。
+#    gamma 公式在 `legs()` 裡內嵌算過一次,那是**唯一**的計算點。
+#    ⛔ 別「收斂」成讓 legs() 呼叫它:legs() 為了 vega/vanna 腿本來就需要
+#      sq / d1 / d2 / F,改呼叫等於在熱迴圈(每 series 一次 + profile 約 36 檔
+#      情境各再跑全 series)重算 sq 與 d1 = 零收益的效能倒退。
 
 
 # ---------------- 主流程 ----------------
@@ -772,7 +773,13 @@ def map_window_bars(m_date, eval_date):
 
 
 def reconcile(d):
-    """B3:拿「前一交易日的地圖」對照「今天實際走勢」,逐日累積成 Phase 1 資料集。"""
+    """B3:拿「前一交易日的地圖」對照「今天實際走勢」,逐日累積成 Phase 1 資料集。
+
+    ⚠ 它寫出的 `reconcile.parquet` **目前沒有顯示端** —— 讀它的 `_html_recon`
+      在 `4710ae1` 被刻意移出 HTML(函式本體 2026-08-23 才補刪)。
+      這**不代表 `reconcile()` 是死碼**:它的產出是刻意累積的離線研究資料集,
+      樣本要靠時間長出來。別因為「沒人讀那個 parquet」就把它一起清掉。
+    """
     p = TXO_ROOT / "daily_summary.parquet"
     if not p.exists():
         return None
@@ -1108,30 +1115,10 @@ def _svg_signlog(d, days=45, w=880, h=230):
     return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(P)}</svg>', note
 
 
-def _html_recon(d, n=6):
-    """B3 面板:近幾日「地圖 vs 實際」對賬 + 依體制分組的已實現波動。"""
-    p = TXO_ROOT / "reconcile.parquet"
-    if not p.exists():
-        return "<p class='mut'>(對賬資料累積中,需至少兩個交易日)</p>"
-    df = pl.read_parquet(p).sort("map_date")
-    rec = df.tail(n).reverse().to_dicts()
-    tr = "".join(
-        f"<tr><td>{r['map_date']}→{r['eval_date'][5:]}</td>"
-        f"<td>{r['tot_us']:+.1f}</td>"
-        f"<td>{'上' if r['above_flip'] else '下'} {r['flip_fut']:,.0f}</td>"
-        f"<td>{'✅守住' if not r['broke_flip'] else '❌跌破' if r['above_flip'] else '❌突破'}</td>"
-        f"<td>{r['range']:.0f} ({r['range_pct']:.2f}%)</td>"
-        f"<td>{r['move']:+.0f}</td></tr>" for r in rec)
-    agg = ""
-    if df.height >= 6:
-        g = (df.group_by("above_flip")
-             .agg(pl.len().alias("n"), pl.col("range_pct").mean().alias("avg"))
-             .sort("above_flip", descending=True).to_dicts())
-        agg = "<p style='margin:10px 0 0'>依體制分組(樣本太少,僅供累積觀察):" + " · ".join(
-            f"flip{'之上' if r['above_flip'] else '之下'} n={r['n']} 平均日振幅 {r['avg']:.2f}%"
-            for r in g) + "</p>"
-    return (f"<table><tr><th>地圖日→適用日</th><th>總GEX</th><th>當時位置</th><th>flip 結果</th>"
-            f"<th>實際振幅</th><th>漲跌</th></tr>{tr}</table>{agg}")
+# ⚠️ 2026-08-23:這裡曾有 `_html_recon(d, n)`(B3 對賬面板)—— 它的呼叫端在
+#    `4710ae1` 被**刻意**移出 HTML,函式本體忘了帶走。
+#    ⚠ 別因此推論「沒人讀 reconcile.parquet ⇒ `reconcile()` 也是死碼」——
+#      那是錯的,見 `reconcile()` 的 docstring。
 
 
 def render_html(d, S, meta, gex, inst, expiries, pct=None):

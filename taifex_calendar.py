@@ -146,16 +146,11 @@ def download(data_root: str, year: int, current_year: int) -> Optional[str]:
     return p
 
 
-def is_published(year: int, current_year: int) -> bool:
-    """次年行事曆是否已公布(每年約 11 月中旬)。給 daily_sync 每天做的極廉價探測用。"""
-    import urllib.request
-
-    url = (CALENDAR_URL_CURRENT if year >= current_year else CALENDAR_URL_PAST).format(year=year)
-    try:
-        r = urllib.request.urlopen(
-            urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"}, method="HEAD"),
-            timeout=25,
-        )
-        return int(r.headers.get("Content-Length", 0)) > 0
-    except Exception:
-        return False
+# ⚠️ 2026-08-23:這裡曾有 `is_published(year, current_year)` —— 零呼叫端,而它的
+#    docstring 卻寫著「給 daily_sync 每天做的極廉價探測用」。daily_sync 從沒用過它,
+#    **文件承諾了一個不存在的偵測**。
+#    ⚠ 真正的缺口不是它:`python -m settlement_registry`(daily_sync 第 ⑥ 步)跑的
+#      `update()` 根本不呼叫 `import_calendars()` —— 年度 PDF 攝取整條是手動的
+#      (只有 `--import-calendars` 旗標走得到)。要補那個洞,正確題目是
+#      「import_calendars 要不要進 daily_sync」,而且從上面的 `download()` 出發
+#      (GET + %PDF magic,判準比 HEAD + Content-Length 硬),用不到這 13 行。

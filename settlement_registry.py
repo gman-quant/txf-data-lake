@@ -397,13 +397,13 @@ def update(verbose: bool = True, skip_shioaji: bool = False) -> dict:
     return stats
 
 
-def load_settlement_dates() -> set:
-    """給消費端用:回傳結算日 set[date]。檔案不存在回空集合(呼叫端自行 fallback)。"""
-    try:
-        with open(CALENDAR_CSV, newline="", encoding="utf-8") as f:
-            return {dt.date.fromisoformat(r["date"]) for r in csv.DictReader(f)}
-    except Exception:
-        return set()
+# ⚠️ 2026-08-23:這裡曾有 `load_settlement_dates()`,自稱「給消費端用」——
+#    但唯一的消費端(txf-quant-platform)從第一天起就自己讀 CSV
+#    (`DataEngine._load_settlement_dates` / `feeds/historical._settlement_days`),
+#    而 platform wiki 把**那份**釘成單一來源。這支從沒有過消費端。
+#    ⚠ 兩邊的失敗語意刻意不同:這支「讀不到回空集合」,platform 那側「讀不到就 raise」。
+#      要重建跨 repo 的共用入口,得先談那個差異,不是把這支接回去。
+#    `import csv` 留著 —— `_read` / `_write` 在用。
 
 
 def import_calendars(years, verbose: bool = True) -> dict:
