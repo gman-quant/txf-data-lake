@@ -91,18 +91,31 @@ def resolve_scheduled(year: int, month: int) -> Optional[dt.date]:
 
 
 # ── TAIFEX OpenAPI ───────────────────────────────────────────────────────
-def _get_json(url: str, timeout: int = 20):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        # utf-8-sig:期交所 2026-07 起部分端點加 BOM;無 BOM 時與 utf-8 等價
-        return json.loads(r.read().decode("utf-8-sig"))
+# (_get_json 已於 2026-08-24 移除 —— 兩個呼叫端都改走 `_fetch_rows_any` 的嗅探,
+#  留著它就是下一個「零呼叫端的死碼」。utf-8-sig 的理由搬進 _fetch_rows_any。)
 
 
-def _get_csv_rows(url: str, timeout: int = 20) -> List[dict]:
-    """期交所 2026-07 中把 DailyMarketReportFut 從 JSON 改成 CSV(UTF-8+BOM、
-    中文表頭、Accept 談判無效)→ 以表頭名取欄,回傳 list[dict]。"""
+def _fetch_rows_any(url: str, timeout: int = 20) -> List[dict]:
+    """**嗅探格式**,不賭哪一種 —— 這個端點的格式已震盪三次:
+        原生 JSON → CSV + 中文表頭(2026-07-16,舊 JSON 解析靜默失效 9 天)
+                  → JSON + 英文鍵(2026-08 發現;CSV 解析換成 0 筆有效列)
+    每次都讓當時「賭對格式」的解析器靜默歸零。首字元 [ / { = JSON,否則 CSV。
+    欄名差異由呼叫端用 `_col()` 的雙語名單吸收。"""
     with urllib.request.urlopen(url, timeout=timeout) as r:
         text = r.read().decode("utf-8-sig")
+    s = text.lstrip()
+    if s.startswith("[") or s.startswith("{"):
+        rows = json.loads(s)
+        return rows if isinstance(rows, list) else [rows]
     return list(csv.DictReader(text.splitlines()))
+
+
+def _col(row: dict, *names) -> str:
+    """依序試多個欄名(中文 CSV 版 / 英文 JSON 版),都沒有回空字串。"""
+    for n in names:
+        if n in row:
+            return str(row[n] or "").strip()
+    return ""
 
 
 def fetch_final_settlement() -> Optional[Tuple[dt.date, str, float]]:
@@ -116,7 +129,7 @@ def fetch_final_settlement() -> Optional[Tuple[dt.date, str, float]]:
     月結算會在窗口內被每日排程撈到(與既有「API 偶爾失敗」同級的容錯)。
     """
     try:
-        for row in _get_json(TAIFEX_FINAL_SETTLE):
+        for row in _fetch_rows_any(TAIFEX_FINAL_SETTLE):
             if "TX" not in str(row.get("Contract", "")).split("/"):
                 continue
             m = str(row.get("ContractDeliveryMonth", "")).strip()
@@ -133,22 +146,23 @@ def fetch_final_settlement() -> Optional[Tuple[dt.date, str, float]]:
 def fetch_daily_settlements() -> Tuple[Optional[dt.date], Dict[str, float]]:
     """最新交易日的 TX 各月份**每日結算價** → (該日, {到期月份: 結算價})。只取一般交易時段。
 
-    ⚠ 2026-07-27 修:端點已改回 CSV(舊 JSON 解析 7/16 起靜默失效、被 except 吞掉
-    → roll_event 卡「待補」)。改以中文表頭取欄;失敗改為印警告,不再無聲。
+    ⚠ 2026-07-27 修:端點已改回 CSV → 以中文表頭取欄。
+    ⚠ 2026-08-24 再修:端點**又**翻回 JSON(英文鍵,`TradingSession` 值仍中文
+      「一般」)⇒ CSV 解析拿 0 筆有效列。改嗅探格式 + 雙語欄名,兩種都吃。
     """
     out: Dict[str, float] = {}
     day: Optional[dt.date] = None
     try:
-        for row in _get_csv_rows(TAIFEX_DAILY_FUT):
-            if str(row.get("契約代號", "")).strip() != "TX":
+        for row in _fetch_rows_any(TAIFEX_DAILY_FUT):
+            if _col(row, "契約代號", "Contract") != "TX":
                 continue
-            if str(row.get("交易時段", "")).strip() != "一般":
+            if _col(row, "交易時段", "TradingSession") != "一般":
                 continue
-            m = str(row.get("到期月份(週別)", "")).strip()
-            sp = str(row.get("結算價", "") or "").strip()
+            m = _col(row, "到期月份(週別)", "ContractMonth(Week)")
+            sp = _col(row, "結算價", "SettlementPrice")
             if "/" in m or sp in ("", "-", "NULL"):      # 價差組合單 / 無值
                 continue
-            day = dt.datetime.strptime(str(row["日期"]).strip(), "%Y%m%d").date()
+            day = dt.datetime.strptime(_col(row, "日期", "Date"), "%Y%m%d").date()
             out[m] = float(sp.replace(",", ""))
     except Exception as e:
         print(f"  ⚠️ fetch_daily_settlements 失敗({e});端點格式可能又變了")
@@ -390,6 +404,44 @@ def update(verbose: bool = True, skip_shioaji: bool = False) -> dict:
     _write(CALENDAR_CSV, CAL_FIELDS, cal)
     _write(ROLL_EVENTS_CSV, ROLL_FIELDS, roll)
 
+    # ②c 盲月的年度行事曆**自動**攝取(2026-08-24,產品碼稽核)。
+    #
+    # 病:演算法刻意不猜 1、2 月(ALGO_BLIND_MONTHS,春節必錯),那兩個月**只能**
+    # 來自期交所年度行事曆 PDF —— 而攝取入口 `import_calendars()` 先前只有手動的
+    # `--import-calendars` 旗標走得到,daily_sync 第 ⑥ 步跑的 `-m settlement_registry`
+    # 根本不會呼叫它。⇒ 2027-01 / 02 在 2026-08 當下就是缺的;拖到 2027-01 的結算日,
+    # `is_settlement()` 對真結算日回 False ⇒ SVWAP / sB / 前結參考線**不重錨**,
+    # 而 CSV 存在且非空,不會有任何例外。
+    #
+    # 修:盲月進入 90 天視野而無權威覆蓋 → 每日 sync 自動嘗試攝取該年 PDF。
+    #   ‧ 90 天閘:PDF 約 11 月中公布,10 月初起探測留足裕度;**不用 FUTURE_MONTHS
+    #     當視野**(它是 18 個月,會讓七月就開始天天打一份不存在的 PDF)。
+    #   ‧ 冪等:攝取成功 → 盲月有 AUTHORITATIVE 覆蓋 → 之後每天這段直接跳過。
+    #   ‧ 失敗無害:download() 以 %PDF magic 驗身,拿到錯誤頁回 None、整年跳過並
+    #     大聲說明(import_calendars 既有的語意閘,寧可少一年不可寫入解錯的日期)。
+    #   ‧ 放在 update 自己的 _write **之後**:import_calendars 內部自己讀寫 CSV,
+    #     放前面會被本函式手上的舊 `cal` 蓋回去。寫完重讀,讓 ④ 複驗層驗到新狀態。
+    _blind_pending = []
+    _yy, _mm = today.year, today.month
+    for _ in range(FUTURE_MONTHS):
+        if _mm in ALGO_BLIND_MONTHS:
+            _c = f"{_yy}{_mm:02d}"
+            _covered = any(v.get("contract") == _c
+                           and (v.get("status") == "settled"
+                                or v.get("source") in AUTHORITATIVE)
+                           for v in cal.values())
+            _eta = (dt.date(_yy, _mm, 1) - today).days
+            if not _covered and 0 <= _eta <= 90:
+                _blind_pending.append((_yy, _mm))
+        _mm += 1
+        if _mm > 12:
+            _yy, _mm = _yy + 1, 1
+    if _blind_pending:
+        _years = sorted({y_ for y_, _m2 in _blind_pending})
+        log(f"  ⏳ 盲月 {_blind_pending} 90 天內到期且無權威來源 → 嘗試攝取年度行事曆 {_years}")
+        stats["calendar_import"] = import_calendars(_years, verbose=verbose)
+        cal = _read(CALENDAR_CSV, "date")
+
     # ④ 複驗層(只報警不寫入):我們自己的資料先驗,再用 Shioaji 合約主檔多看一眼
     stats["postpone_suspect"] = verify_settlement_traded(cal, log)["suspect"]
     if not skip_shioaji:
@@ -469,7 +521,10 @@ if __name__ == "__main__":
         print(f"遷移歷史… {migrate_history()} 筆")
     if "--import-calendars" in sys.argv:
         i = sys.argv.index("--import-calendars")
-        rng = sys.argv[i + 1] if len(sys.argv) > i + 1 and "-" in sys.argv[i + 1] else "2019-2027"
+        # 上界由今年推導(2026-08-24)—— 寫死 "2027" 意味著 2027-11 之後手動攝取
+        # 2028 的行事曆會被靜靜截掉(而且不報錯)。
+        _default_rng = f"2019-{dt.datetime.now().year + 1}"
+        rng = sys.argv[i + 1] if len(sys.argv) > i + 1 and "-" in sys.argv[i + 1] else _default_rng
         a, b = (int(x) for x in rng.split("-"))
         print(f"匯入期交所年度行事曆 {a}~{b}…")
         print(" ", import_calendars(range(a, b + 1)))
