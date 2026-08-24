@@ -37,6 +37,7 @@ import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES          # noqa: E402
+from config.lake_paths import kbar_paths, list_kbar_files              # noqa: E402
 from core.resampler import resample_to_kbars               # noqa: E402
 
 OLD_COLS = ["symbol", "date", "ts", "session",
@@ -101,8 +102,9 @@ def run(symbols, dry_run: bool) -> int:
     for sym in symbols:
         raw_files = sorted(glob.glob(
             os.path.join(DATA_ROOT, "raw_ticks", sym, "*", "*", f"*_{sym}_ticks.parquet")))
-        yearly_files = sorted(glob.glob(os.path.join(kbars_root, "1d", sym,
-                                                     f"{sym}_1d_*.parquet")))
+        # 2026-08-24:改走存取層(第四類護欄)。本工具是 2026-08-15 的一次性回填,
+        # 留著是為了可重跑 —— 翻 LAYOUT 後手拼會靜靜列到空集合,重跑就是空轉。
+        yearly_files = sorted(list_kbar_files("1d", sym))
         # 1d 只要還有任何年檔缺新欄,就得對每一天重算(年檔身分靠全史累積)
         need_1d = any("true_pt_sum" not in pl.scan_parquet(y).collect_schema().names()
                       for y in yearly_files)
@@ -112,8 +114,8 @@ def run(symbols, dry_run: bool) -> int:
             date_str = os.path.basename(rf)[:10]
             year = date_str[:4]
             intraday_tfs = [tf for tf in TIMEFRAMES if tf != "1d"]
-            targets = {tf: os.path.join(kbars_root, tf, sym, year,
-                                        f"{date_str}_{sym}_{tf}.parquet")
+            targets = {tf: kbar_paths(tf, sym, date_str, date_str,
+                                      existing_only=False)[0]
                        for tf in intraday_tfs}
             need = [tf for tf in intraday_tfs
                     if os.path.exists(targets[tf])
