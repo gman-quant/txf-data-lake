@@ -26,7 +26,8 @@ import polars as pl
 
 # 2026-08-17:本檔原本**繞過自家 config/settings** 自己寫死一份路徑 ——
 # 兩處分歧的話沒有任何東西會警告。改走 vendored 正典。
-from config.lake_paths import ARCHIVE_ROOT, CACHE_ROOT
+from config.lake_paths import (ARCHIVE_ROOT, CACHE_ROOT, kbar_paths,
+                               list_kbar_files)
 
 DATA_ROOT = Path(ARCHIVE_ROOT)
 # kbars 屬 **cache**(可能在別的磁碟),不在 ARCHIVE_ROOT 底下。
@@ -142,14 +143,14 @@ def trading_days():
     global _TRADING_DAYS
     if _TRADING_DAYS is None:
         s = set()
-        p = CACHE_ROOT_P / "1d" / "TXF"
-        if p.exists():
-            for f in sorted(p.glob("*.parquet")):
-                try:
-                    df = pl.read_parquet(f).filter(pl.col("session") == "Day")
-                    s |= {str(x) for x in df["date"].to_list()}
-                except Exception:  # noqa: BLE001
-                    pass
+        # 2026-08-24 改走存取層:自己拼 `CACHE_ROOT/1d/TXF` 是佈局的第二份實作,
+        # 翻 LAYOUT 那天會靜靜列到空目錄(同 main_etl 寫入端那條稽核發現的形狀)。
+        for f in sorted(list_kbar_files("1d", "TXF")):
+            try:
+                df = pl.read_parquet(f).filter(pl.col("session") == "Day")
+                s |= {str(x) for x in df["date"].to_list()}
+            except Exception:  # noqa: BLE001
+                pass
         _TRADING_DAYS = s
     return _TRADING_DAYS
 
@@ -232,9 +233,10 @@ def num(s):
 
 def taiex_close(d):
     """從資料湖取 TAIEX 日盤收盤(TXO 的真正標的)。取不到回 None。"""
-    p = CACHE_ROOT_P / "1d" / "TSE" / f"TSE_1d_{d.year}.parquet"
-    if not p.exists():
+    _ps = kbar_paths("1d", "TSE", d, d)          # 存取層知道佈局(年檔)
+    if not _ps:
         return None
+    p = _ps[0]
     try:
         df = pl.read_parquet(p).filter(
             (pl.col("date").cast(pl.Utf8) == str(d)) & (pl.col("session") == "Day"))
@@ -730,11 +732,11 @@ def percentiles(d, gex, lookback=60):
 def atr_txf(d, n=14):
     """TXF 交易日 ATR(日盤+當晚夜盤 合併為一根)—— 把 flip 距離換算成「幾個波動單位」。
     絕對點數在不同價格水準/波動體制間不可比,除以 ATR 才有跨日意義。"""
-    p = CACHE_ROOT_P / "1d" / "TXF" / f"TXF_1d_{d.year}.parquet"
-    if not p.exists():
+    _ps = kbar_paths("1d", "TXF", d, d)
+    if not _ps:
         return None
     try:
-        df = pl.read_parquet(p).filter(pl.col("date").cast(pl.Utf8) <= str(d))
+        df = pl.read_parquet(_ps[0]).filter(pl.col("date").cast(pl.Utf8) <= str(d))
     except Exception:  # noqa: BLE001
         return None
     g = (df.group_by("date").agg(pl.col("high").max().alias("h"), pl.col("low").min().alias("l"),
@@ -753,11 +755,11 @@ def map_window_bars(m_date, eval_date):
     ⚠ 湖的夜盤以「起始日」標記(date=7/23 Night 的 ts 是 7/23 15:00 → 7/24 04:55),
     所以視窗要跨兩個 date 標籤取,不能用單一 date 的 Day+Night(那會漏掉前一晚、多算後一晚)。"""
     def rows(dt, sess):
-        p = CACHE_ROOT_P / "1d" / "TXF" / f"TXF_1d_{dt.year}.parquet"
-        if not p.exists():
+        _ps = kbar_paths("1d", "TXF", dt, dt)
+        if not _ps:
             return None
         try:
-            df = pl.read_parquet(p).filter(
+            df = pl.read_parquet(_ps[0]).filter(
                 (pl.col("date").cast(pl.Utf8) == str(dt)) & (pl.col("session") == sess))
         except Exception:  # noqa: BLE001
             return None
@@ -1484,9 +1486,31 @@ def _lake_has_trading_day(d):
     daily_sync 13:50 就跑完了,所以本支 14:25 起輪詢時,**交易日的檔案必然已存在**;
     國定假日/颱風假則因 main_etl 的幻影守衛而不會有檔。這是現成、零成本的休市判別,
     不必再維護一份 TAIFEX 日曆(與 data-ops「假日免維護」同一個機制)。
+
+    ## 三態(2026-08-24,產品碼稽核):`True` / `False` / `None`
+
+    舊版只回 True/False,而「休市」與「**探針自己壞了**」共用同一個 False ——
+    任何讓路徑失準的改動(翻 LAYOUT、換 CACHE_ROOT、改檔名慣例)都讓它對每個
+    交易日回 False ⇒ `write_gex_state` 永遠走「休市不算失敗」⇒
+    `consecutive_failures` 永不累加 ⇒ **GEX 的唯一告警被釘死在「不吵」**,
+    而那正是 TAIFEX 端點哪天又改版(TSE001→IX0001 那一類)時最需要它的時刻。
+
+    判別「探針壞了」的尺:`kbar_paths`(吃佈局表)找不到那天,**但**
+    `list_kbar_files`(os.walk,佈局盲)看得到這個 (tf, symbol) 有檔 ⇒
+    兩把尺自相矛盾 = 佈局/根目錄出了問題,回 `None`(呼叫端要當失敗累加)。
+    兩把都空 ⇒ 整個湖看不到,同樣 `None`。
     """
-    p = CACHE_ROOT_P / "5m" / "TXF" / str(d.year) / f"{d}_TXF_5m.parquet"
-    return p.exists()
+    if kbar_paths("5m", "TXF", d, d):
+        return True                                    # 有檔:交易日
+    if list_kbar_files("5m", "TXF"):
+        # 佈局尺找不到、佈局盲尺卻有檔 ⇒ 若 d 是交易日,這就是探針壞了;
+        # 但 d 也可能真的是假日。用「d 往前 7 個日曆日內連一天都找不到」加嚴:
+        # 台指不存在連續 7 天休市(春節最長 6 天),全空 = 佈局壞了不是假日。
+        for k in range(1, 8):
+            if kbar_paths("5m", "TXF", d - timedelta(days=k), d - timedelta(days=k)):
+                return False                           # 附近找得到:單純休市
+        return None                                    # 附近全空但湖有檔:探針壞了
+    return None                                        # 整個湖看不到
 
 
 def write_gex_state(d, ok, attempts, mode="wait"):
@@ -1513,10 +1537,15 @@ def write_gex_state(d, ok, attempts, mode="wait"):
         st["last_ok_date"] = str(d)
         st["last_ok_ts"] = now
         st["consecutive_failures"] = 0
-    elif trading:
-        st["consecutive_failures"] = int(st.get("consecutive_failures", 0)) + 1
-    else:
+    elif trading is False:
         st["note"] = "giveup_non_trading_day"      # 不累加 —— 休市不是故障
+    else:
+        # trading is True(交易日拿不到)**或 None(探針自己壞了)都累加** ——
+        # fail-closed(2026-08-24):探針失準的那一刻正是告警最不能沉默的時刻。
+        # None 額外標註,讓 daily_sync 的 SUMMARY 看得出「該修的是探針不是端點」。
+        st["consecutive_failures"] = int(st.get("consecutive_failures", 0)) + 1
+        if trading is None:
+            st["note"] = "probe_broken_cannot_see_lake"
     try:
         GEX_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         GEX_STATE_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2),
