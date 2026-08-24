@@ -1,8 +1,9 @@
 import os
 import glob
 import polars as pl
-from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES
+from config.settings import DATA_ROOT, TIMEFRAMES
 from core.resampler import resample_to_kbars
+from lake_writer import save_kbars
 
 def run_fix():
     print(f"🔄 Preparing to fix existing K-bars in: {DATA_ROOT}")
@@ -39,13 +40,12 @@ def run_fix():
             if kbar_df.is_empty():
                 continue
                 
-            # 分時線路徑邏輯 (同 main_etl.py)
-            kbar_dir = os.path.join(CACHE_ROOT, tf, symbol, year)
-            os.makedirs(kbar_dir, exist_ok=True)
-            save_path = os.path.join(kbar_dir, f"{date_str}_{symbol}_{tf}.parquet")
-            
-            # 直接覆蓋舊有的檔案
-            kbar_df.write_parquet(save_path)
+            # 2026-08-24:改走 lake_writer 單一出口(同 main_etl)。
+            # 順帶把舊的**非原子** write_parquet 換成原子寫 —— 重建跑到一半被砍,
+            # 留半成品在湖裡與 main_etl 當年的資料遺失鏈是同一族。
+            # ⚠ 多日容器下本工具是逐日 merge,不適合全量重建(殘影問題,
+            #   見 lake_writer 檔頭)—— 全量重建照慣例刪 cache 重建。
+            save_kbars(symbol, tf, date_str, kbar_df)
             
     print("\n✅ All historical K-bars have been successfully fixed and overwritten.")
 

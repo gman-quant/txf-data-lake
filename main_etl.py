@@ -8,9 +8,10 @@ from datetime import datetime
 import polars as pl
 
 # 引入我們寫好的模組
-from config.settings import CACHE_ROOT, DATA_ROOT, TIMEFRAMES
+from config.settings import DATA_ROOT, TIMEFRAMES
 from adapters.shioaji_source import ShioajiSource
 from core.resampler import resample_to_kbars
+from lake_writer import save_kbars, atomic_write_parquet as _atomic_write_parquet
 
 # 定義目標商品清單
 TARGET_SYMBOLS = ['TXF', 'TSE', 'TXFR2']
@@ -20,27 +21,8 @@ SYMBOL_TRIES = 3
 SYMBOL_RETRY_WAIT = 20               # 秒;線性退避 20s、40s
 
 
-def _atomic_write_parquet(df, path):
-    """原子寫入:先寫同目錄的暫存檔,再 `os.replace` 換上去。
-
-    為什麼(2026-07-21 加):`df.write_parquet(path)` 直接寫目標檔,行程若在寫到
-    一半被中斷(斷電、被砍、磁碟滿),留下的是**毀損的半成品**。對 1d 年檔尤其致命 ——
-    下次執行讀不動它,就會落進「用單日資料覆寫整年」的回退路徑(見 run_pipeline)。
-    同一檔案系統上的 rename 是原子的:要嘛看到舊檔、要嘛看到完整新檔,沒有中間狀態。
-    """
-    tmp = f"{path}.tmp{os.getpid()}"
-    try:
-        df.write_parquet(tmp)
-        os.replace(tmp, path)          # 原子換檔(Windows/Linux 皆是)
-    except Exception:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-        raise
-
-
+# (_atomic_write_parquet 已搬進 lake_writer —— kbar 與 raw ticks 共用同一支,
+#  原子性的理由與原文照搬,見該檔。)
 def _clean_sunday(tick_df, date_str):
     """根治「週日檔 / 週日幻影列」,且**不破壞既有歸檔慣例、零資料遺失**。
 
@@ -192,58 +174,24 @@ def _process_symbol(symbol, date_str, year, month, source):
                 if kbar_df.is_empty():
                     return          # 原為 for 迴圈內的 continue(本體已抽成函式)
 
-                # [分流儲存策略] 根據週期決定儲存策略
-                # Case A: 日線 (1d) -> 存成「年檔」，使用 Append 模式
-                if tf == '1d':
-                    kbar_dir = os.path.join(CACHE_ROOT, tf, symbol)
-                    os.makedirs(kbar_dir, exist_ok=True)
-                    
-                    # 檔名: TXF_1d_2025.parquet
-                    save_path = os.path.join(kbar_dir, f"{symbol}_{tf}_{year}.parquet")
-                    
-                    if os.path.exists(save_path):
-                        # 讀取舊檔 -> 合併 -> 去重 -> 寫回
-                        try:
-                            existing_df = pl.read_parquet(save_path)
-                            # 合併去重:一根 1d bar 的身分是 (date, session),不是 ts。
-                            # ts=該盤第一筆 tick 時間,不同次抓會差幾毫秒 → 用 ts 當鍵會把同一根夜盤
-                            # 認成兩根而重複累積(尤其每週五夜盤來自「週六請求」、被重跑多次)。改用 (date,session)。
-                            final_df = (
-                                pl.concat([existing_df, kbar_df])
-                                .unique(subset=["date", "session"], keep="last")
-                                .sort("ts")
-                            )
-                        except Exception as e:
-                            # ⚠️ 2026-07-21 修正資料遺失鏈:
-                            #    原本這裡是 `final_df = kbar_df`(只剩「今天這一天」)然後照樣
-                            #    覆寫整年檔 → **一次讀取失敗就賠掉一整年的 1d bar**,而且只印
-                            #    一行 ⚠️ 不中斷。搭配當時的非原子寫入,故障鏈是:
-                            #      ① 寫到一半被中斷 → 年檔毀損
-                            #      ② 下次 read_parquet 失敗 → 用單日覆寫整年
-                            #    現在改為:**保住既有檔案、跳過本次 1d 更新、用 ❌ 大聲報**
-                            #    (❌ 是 daily_sync Tee 的錯誤標記,會浮到 [SUMMARY])。
-                            #    不 raise 的原因:第 57 行的 try 包住整個 for symbol 迴圈,
-                            #    raise 會讓後續商品(TSE / TXFR2)整個不處理,爆炸半徑過大。
-                            print(f"❌ 1d 年檔讀取失敗,已跳過本次更新以保住既有資料")
-                            print(f"   檔案:{save_path}")
-                            print(f"   原因:{type(e).__name__}: {e}")
-                            print(f"   影響:本商品的 1d 不更新(其他 TF 與其他商品不受影響);")
-                            print(f"        修好該檔前每天都會重複此錯誤 —— 這是刻意的,別忽略。")
-                            return          # 原為 for 迴圈內的 continue(本體已抽成函式)
-                    else:
-                        final_df = kbar_df
-
-                    _atomic_write_parquet(final_df, save_path)
-                    print(f"   -> {tf} Updated: {save_path} (Total days: {len(final_df)//2})")
-
-                # Case B: 分時/分秒 (1m, 5s...) -> 存成「日檔」，直接覆蓋
+                # 儲存:**單一出口 `lake_writer.save_kbars`**(2026-08-24)。
+                # 舊版在這裡用 `if tf == '1d'` 自己分流年檔/日檔 —— 那是佈局的
+                # 第二份實作,翻 `lake_paths.LAYOUT` 那天讀取端跟著走、這裡不會,
+                # 六個 TF 的新棒會同時靜止而且三層偵測都看不到(稽核 blocker)。
+                # 現在佈局/合併語意/原子寫全在 lake_writer;這裡只剩「叫它、報告」。
+                saved = save_kbars(symbol, tf, date_str, kbar_df)
+                if saved is None:
+                    continue    # ❌ 已由 save_kbars 大聲說明(保住既有檔案)。
+                                # ⚠ 舊版這裡是 `return` —— 只因 1d 排在 TIMEFRAMES
+                                #   最後才恰好等價於 continue(抽函式時的位置巧合);
+                                #   多日容器不再只有最後一個 TF 之後,continue 才對。
+                if tf == "1d":
+                    # 保留舊格式的行(Total days = 年檔列數/2:日+夜各一根)
+                    import polars as _pl
+                    _n = _pl.read_parquet(saved).height
+                    print(f"   -> {tf} Updated: {saved} (Total days: {_n//2})")
                 else:
-                    kbar_dir = os.path.join(CACHE_ROOT, tf, symbol, year)
-                    os.makedirs(kbar_dir, exist_ok=True)
-                    
-                    save_path = os.path.join(kbar_dir, f"{date_str}_{symbol}_{tf}.parquet")
-                    _atomic_write_parquet(kbar_df, save_path)
-                    print(f"   -> {tf} Saved: {save_path} ({len(kbar_df)} bars)")
+                    print(f"   -> {tf} Saved: {saved} ({len(kbar_df)} bars)")
 
 
 if __name__ == "__main__":
