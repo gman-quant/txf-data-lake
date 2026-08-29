@@ -196,6 +196,24 @@ def require_roots(*roots):
 #:    但 `txf-quant-stable` 釘在 tag、跑的是舊碼 ⇒ **翻表之前必須先 promote**,
 #:    否則看盤會讀不到檔而且只會安靜地變空圖。
 LAYOUT = {
+    # 🔴 2026-08-29 翻表:5s/1m/5m/30m/1h daily → monthly。
+    #   依據是**冷快取實測**(不是直覺,也不是暖快取):同一份資料兩種佈局、
+    #   兩邊都在同一顆 SSD、重開機後各只讀一次 ——
+    #       daily 29.27s → monthly 3.33s(8.79×,9/9 組全勝)
+    #   機制:冷讀成本是「**每個檔**」不是每 byte —— daily 那欄不管資料多大都是
+    #   ~3.0–4.0s(30m 全史 8MB 與 5s 全史 232MB **一樣久**),約 1.9ms × 1,600 檔。
+    #   ⚠ **暖快取量不出來**(開檔幾乎免費,只差 0.2s)—— 先前據此判「不值得改」是
+    #     量錯 regime。🔒 A/B 兩邊必須在**同一顆實體磁碟**(初版把 monthly 放 D:
+    #     的機械碟、daily 在 C: 的 SSD,量到的是碟的差別,而錯誤結論還剛好等於預測)。
+    #   ⚠ yearly **不是更好**:窄查詢要碰整份年檔(近 60 天 daily 0.013s /
+    #     monthly 0.007s / yearly 0.016s),而日常看盤都是窄查詢。
+    #   遷移方式=**轉換不重建**(重建會引入 true_pv_sum 浮點加總序差異),
+    #   15 組 2,690 萬列逐欄相同 oracle 過關;舊日檔保留為 `<SYM>_old`。
+    "5s": "monthly",
+    "1m": "monthly",
+    "5m": "monthly",
+    "30m": "monthly",
+    "1h": "monthly",
     "1d": "yearly",
 }
 DEFAULT_LAYOUT = "daily"
