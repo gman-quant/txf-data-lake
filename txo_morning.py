@@ -68,6 +68,7 @@ HISTORY = TXO_ROOT / "logs" / "morning_history.jsonl"
 LOGDIR = TXO_ROOT / "logs"
 
 MB, ME = "<!-- MORNING-BEGIN -->", "<!-- MORNING-END -->"
+L1B, L1E = "<!-- L1-BEGIN -->", "<!-- L1-END -->"
 OB, OE = "<!-- OPEN-BEGIN -->", "<!-- OPEN-END -->"
 SLOT = "<!-- MORNING-SLOT -->"
 OSLOT = "<!-- OPEN-SLOT -->"
@@ -407,6 +408,12 @@ def build_morning_block(fc, night, target, weekend):
 def build_open_block(O, sp, spec_key):
     spec = CALIB[spec_key]
     hi, lo = spec["hi"], spec["lo"]
+    lanes = [("最高點", "#ef5350", hi[0], hi[1], hi[2], None, hi[3]),
+             ("收盤", "#7f8ea3", -spec["cl67"], 0.0, spec["cl67"],
+              -spec["cl90"], spec["cl90"]),
+             ("最低點", "#26a69a", lo[3], lo[1], lo[2], lo[0], None)]
+    svg = _svg_lanes(O, sp, [{"label": "今日日盤", "time": f"錨 = 開盤 {O:,.0f}",
+                              "lanes": lanes}])
     g = lambda x: f"{O + x * sp:,.0f}"
     return (
         f"{OB}\n<div class='panel' style='border-color:#26a69a;background:#10181a'>"
@@ -418,10 +425,32 @@ def build_open_block(O, sp, spec_key):
         f"最低 67% <b>{g(lo[3])} ~ {g(lo[2])}</b>(中位 {g(lo[1])})· 90% {g(lo[0])}<br>"
         f"收盤 67% <b>{O - spec['cl67'] * sp:,.0f} – {O + spec['cl67'] * sp:,.0f}</b>"
         f" · 90% {O - spec['cl90'] * sp:,.0f} – {O + spec['cl90'] * sp:,.0f}"
-        f"</div></div>\n{OE}")
+        f"</div>" + svg + _lane_legend() + f"</div>\n{OE}")
 
 
 # ---------------- 檔案操作(冪等 + 原子)----------------
+
+def _collapse_span(html, b, e, summary):
+    """把 b..e 標記之間的內容包進 <details>(冪等:已包過就跳過)。
+
+    2026-09-01 使用者拍板:任何時刻只有最新一層展開 —— 早報落地收合 14:25 的 ①;
+    開盤定稿落地再收合早報。層 1 重生成會自然回到展開,重放後再收合,天然冪等。
+    """
+    if b not in html or e not in html:
+        return html
+    i, j = html.index(b) + len(b), html.index(e)
+    inner = html[i:j]
+    if inner.lstrip().startswith("<details"):
+        return html
+    return (html[:i]
+            + "\n<details style='margin:10px 0'><summary style='cursor:pointer;"
+              "color:#9aa3ad;font-size:16px'>" + summary + "</summary>"
+            + inner + "</details>\n" + html[j:])
+
+
+SUM_L1 = "📋 14:25 收盤版預測(今晚夜盤 + 明日日盤)— 已被上方更新取代,點開對照"
+SUM_MORNING = "🌅 05:05 早報(夜盤計分板 + 日盤重錨)— 已被開盤定稿取代,點開對照"
+
 
 def splice(html, block, begin, end, slot):
     nb, ne = html.count(begin), html.count(end)
@@ -437,11 +466,15 @@ def splice(html, block, begin, end, slot):
                 f"先用 --report-only 重生該日報表")
 
 
-def write_report(fc_date, block, begin=MB, end=ME, slot=SLOT):
+def write_report(fc_date, block, begin=MB, end=ME, slot=SLOT, collapse=()):
     fp = RPT_DIR / f"gex_{fc_date.strftime('%Y%m%d')}.html"
     if not fp.exists():
         raise Abort(f"{fp.name} 不存在")
     html = splice(fp.read_text(encoding="utf-8"), block, begin, end, slot)
+    if "l1" in collapse:
+        html = _collapse_span(html, L1B, L1E, SUM_L1)
+    if "morning" in collapse:
+        html = _collapse_span(html, MB, ME, SUM_MORNING)
     tmp = fp.with_suffix(".tmp")                      # 原子寫:中斷不留半份殘檔
     tmp.write_text(html, encoding="utf-8")
     os.replace(tmp, fp)
@@ -524,7 +557,7 @@ def run_night(target, source, dry):
         print(json.dumps({k: v for k, v in rec.items() if k != "fc"},
                          ensure_ascii=False, indent=1))
         return True
-    fp = write_report(fc_date, block)
+    fp = write_report(fc_date, block, collapse=("l1",))
     append_history(rec)
     write_state(True, "", extra={"last_target": target.isoformat(),
                                  "sigma_prime": rec["sigma_prime"], "mode": rec["mode"],
@@ -568,7 +601,8 @@ def run_open(target, dry, source="kafka"):
     if dry:
         print(f"O={O:,.0f} 尺={sp:,.0f} spec={key}")
         return True
-    fp = write_report(fc_date, block, begin=OB, end=OE, slot=OSLOT)
+    fp = write_report(fc_date, block, begin=OB, end=OE, slot=OSLOT,
+                      collapse=("l1", "morning"))
     write_state(True, "", mode="open")
     print(f"[OK] 開盤定稿 {target} O={O:,.0f}({key})→ {fp.name}")
     return True

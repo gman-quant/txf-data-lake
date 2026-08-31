@@ -1215,7 +1215,7 @@ def _scale_panel(gex, meta):
            + f" · 一日 1&sigma; = <b style='color:#e6e8eb'>{d1:,.0f}</b> 點</div>"
            + svg + foot + red + stop + card + status + "</div>")
     info = {"iv": iv, "pct": pct, "d1": d1, "F": F}
-    return warn + rng, info
+    return warn, rng, info                 # warn 獨立回傳:收合 ① 時 P90 警示要留在外面
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
@@ -1437,7 +1437,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                     f" · 現價到 flip {_terr:.2f}%")
 
     # ── 結算區間 ─────────────────────────────────────────────────────
-    scale_html, _si = _scale_panel(gex, meta)
+    warn_html, rng_html, _si = _scale_panel(gex, meta)
     recent_html, _rmed = _recent_table(d)
     # ── 三張決策卡的值 ────────────────────────────────────────────
     if _si:
@@ -1561,9 +1561,12 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
 </div>
 <!-- OPEN-SLOT -->
 <!-- MORNING-SLOT -->
+{warn_html}
+<!-- L1-BEGIN -->
 <h2>① 今晚與明天 <span class="mut">— 高/低/收區間 · 停損 · 開盤換算卡</span></h2>
 
-{scale_html}
+{rng_html}
+<!-- L1-END -->
 
 <h3>近 10 日:實際波動 vs 當時的定價 <span class="mut">— 報表的自我檢查</span></h3>
 {recent_html}
