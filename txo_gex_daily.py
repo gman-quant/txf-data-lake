@@ -1016,24 +1016,6 @@ def _scale_panel(gex, meta):
     def _pt(x):
         return f"{F + x * d1:,.0f}"
 
-    trow = ""
-    for s in SESS_BANDS:
-        w1, w2 = s["whiff"]
-        trow += (f"<tr><td rowspan='3' style='border-top:2px solid #2a323d'><b>{s['label']}</b>"
-                 f"<br><span class='mut' style='font-size:13px'>{s['time']}</span></td>"
-                 f"<td style='border-top:2px solid #2a323d'>收盤(67%)</td>"
-                 f"<td style='text-align:right;border-top:2px solid #2a323d'><b>{_pt(-s['cl67'])} – {_pt(s['cl67'])}</b></td>"
-                 f"<td style='text-align:right;border-top:2px solid #2a323d'>&plusmn;{s['cl67']*d1:,.0f}</td>"
-                 f"<td class='mut' style='border-top:2px solid #2a323d'>&plusmn;{s['cl67']:.2f}&sigma;</td></tr>"
-                 f"<tr><td><span class='neg'>最高點(67%)</span></td>"
-                 f"<td style='text-align:right'><b>{_pt(s['hi'][0])} – {_pt(s['hi'][2])}</b></td>"
-                 f"<td style='text-align:right'>中位 {_pt(s['hi'][1])}</td>"
-                 f"<td class='mut'>落空 {w1:.1f}%</td></tr>"
-                 f"<tr><td><span class='pos'>最低點(67%)</span></td>"
-                 f"<td style='text-align:right'><b>{_pt(s['lo'][0])} – {_pt(s['lo'][2])}</b></td>"
-                 f"<td style='text-align:right'>中位 {_pt(s['lo'][1])}</td>"
-                 f"<td class='mut'>落空 {w2:.1f}%</td></tr>")
-
     def _off(x):
         """相對錨點的位移;四捨五入到 0 點就直接寫 A(避免出現「A−0」)。"""
         v = x * d1
@@ -1053,46 +1035,23 @@ def _scale_panel(gex, meta):
            + f" · 一日 1&sigma; = <b style='color:#e6e8eb'>{d1:,.0f}</b> 點"
              f" · 錨點 = 今日日盤結算 <b style='color:#f5d90a'>{F:,.0f}</b>(黃虛線)</div>"
            + _svg_session_bands(F, d1)
-           + "<table style='margin-top:6px'>"
-             "<tr><th>盤段</th><th>項目</th><th>67% 區間</th><th>中位 / 寬度</th><th>依據</th></tr>"
-           + trow + "</table>"
-             "<p class='mut' style='margin:8px 0 0'>校準自 640 天實測(2023-12~2026-08,非常態假設);"
-             "夜盤與日盤<b>各自量各自的棒</b>,兩段形狀本來就不同。"
-             f"<br>80% 區間:夜盤 &plusmn;{SESS_BANDS[0]['cl80']*d1:,.0f} 點 · "
-             f"日盤 &plusmn;{SESS_BANDS[1]['cl80']*d1:,.0f} 點。"
-             "<br><b>「落空」= 該區間整段沒發生的比例。</b>夜盤從錨點無縫接續,所以幾乎必然雙向都碰到"
-             f"({SESS_BANDS[0]['whiff'][0]:.1f}% / {SESS_BANDS[0]['whiff'][1]:.1f}%);"
-             "日盤隔著一整段夜盤才開始,錨點常常整段沒被碰到"
-             f"({SESS_BANDS[1]['whiff'][0]:.1f}% / {SESS_BANDS[1]['whiff'][1]:.1f}%)。</p>"
-             "<div class='panel' style='margin-top:10px;background:#181310;border-color:#5a4a30'>"
-             "<b>⚠️ 67% 的帶子<u>本來就每 6 天破一次</u> —— 停損不要設在它的邊上</b>"
-             "<div style='margin-top:6px;font-size:15px'>圖上每條帶子外的淡色尾巴 = 從 67% 延伸到 "
-             "<b>90% 涵蓋</b>。要放停損就用外緣,不要用實心帶的邊。<br>"
-             "<table style='margin-top:6px'><tr><th>盤段</th><th>涵蓋</th><th>最高點上緣</th>"
-             "<th>最低點下緣</th><th>破了之後還會再走</th></tr>"
-           + "".join(
-               f"<tr><td rowspan='3' style='border-top:2px solid #2a323d'><b>{s['label']}</b></td>"
-               f"<td style='border-top:2px solid #2a323d'>67%</td>"
-               f"<td style='text-align:right;border-top:2px solid #2a323d'>{_pt(s['hi'][2])}</td>"
-               f"<td style='text-align:right;border-top:2px solid #2a323d'>{_pt(s['lo'][0])}</td>"
-               f"<td rowspan='3' style='border-top:2px solid #2a323d;font-size:14px' class='mut'>"
-               f"向下 中位 +{s['over']['down'][0]*d1:,.0f} 點 · P90 <b class='neg'>+{s['over']['down'][1]*d1:,.0f}</b> · "
-               f"史上最大 +{s['over']['down'][2]*d1:,.0f}<br>"
-               f"向上 中位 +{s['over']['up'][0]*d1:,.0f} 點 · P90 +{s['over']['up'][1]*d1:,.0f} · "
-               f"史上最大 +{s['over']['up'][2]*d1:,.0f}</td></tr>"
-               f"<tr><td>80%</td><td style='text-align:right'>{_pt(s['hi80'])}</td>"
-               f"<td style='text-align:right'>{_pt(s['lo80'])}</td></tr>"
-               f"<tr><td><b>90%</b></td><td style='text-align:right'><b>{_pt(s['hi90'])}</b></td>"
-               f"<td style='text-align:right'><b>{_pt(s['lo90'])}</b></td></tr>"
-               for s in SESS_BANDS)
-           + "</table>"
-             "<p class='mut' style='margin:6px 0 0'>🔒 <b>突破哪一天會發生,事先看不出來。</b>"
-             "按前一日 IV 百分位分組,日盤跌破 67% 下緣的比率是 19.6% / 12.5% / 17.2% / 14.1%"
-             "(P0-50 / P50-80 / P80-90 / P90+),全期基準 16.7% —— 無單調關係、全部貼著基準。"
-             "σ 已經把 IV 體制正規化掉了,所以<b>只能靠部位與停損寬度承受,不能靠挑日子迴避</b>。"
-             "<br>⚠️ 向下的尾巴比向上肥得多:日盤破了之後 P90 還要再走 "
-             f"<b class='neg'>{SESS_BANDS[1]['over']['down'][1]*d1:,.0f} 點</b>(向上只有 "
-             f"{SESS_BANDS[1]['over']['up'][1]*d1:,.0f} 點)。</p></div></div>"
+           + "<p class='mut' style='margin:8px 0 0;line-height:1.75'>"
+             "<b style='color:#e6e8eb'>實心 = 67%</b>(每 6 個交易日破一次)· "
+             "<b style='color:#8b95a1'>淡色 = 延伸到 90% 涵蓋</b>(每 20 個交易日破一次)· "
+             "豎線 = 中位 · 黃虛線 = 錨點。"
+             "<br>破了之後還會再走:日盤<b class='neg'>向下</b>中位 "
+             f"+{SESS_BANDS[1]['over']['down'][0]*d1:,.0f} 點、P90 "
+             f"<b class='neg'>+{SESS_BANDS[1]['over']['down'][1]*d1:,.0f}</b>;"
+             f"向上 +{SESS_BANDS[1]['over']['up'][0]*d1:,.0f} / "
+             f"+{SESS_BANDS[1]['over']['up'][1]*d1:,.0f} —— <b>向下的尾巴肥一倍。</b>"
+             "<br>🔒 <b>突破哪一天會發生,事先看不出來</b>:按前一日 IV 百分位分組,日盤跌破 67% "
+             "下緣的比率是 19.6 / 12.5 / 17.2 / 14.1%(P0-50 / P50-80 / P80-90 / P90+),"
+             "全期基準 16.7%,無單調關係 &rarr; 只能靠部位與停損寬度承受,不能靠挑日子迴避。"
+             "<br>校準自 640 天實測(2023-12~2026-08,非常態假設);夜盤與日盤各自量各自的棒。"
+             "「整段落空」的比例:夜盤 "
+             f"{SESS_BANDS[0]['whiff'][0]:.1f}% / {SESS_BANDS[0]['whiff'][1]:.1f}%、日盤 "
+             f"{SESS_BANDS[1]['whiff'][0]:.1f}% / {SESS_BANDS[1]['whiff'][1]:.1f}%"
+             "(夜盤從錨點無縫接續,日盤隔著一整段夜盤才開始)。</p>"
              "<div class='panel' style='margin-top:10px;background:#101820'>"
              "<b>明日日盤:換一個更晚的錨點會窄很多</b>"
              "<span class='mut' style='font-size:14px'> — 隔夜跳空佔了收盤變異的 <b>64%</b>,"
@@ -1231,6 +1190,14 @@ def _svg_session_bands(F, d1, w=880):
                      f'text-anchor="end">{F+a*d1:,.0f}</text>'
                      f'<text x="{xb+5:.0f}" y="{y+16}" fill="#8b95a1" font-size="12">'
                      f'{F+b*d1:,.0f}</text>')
+            if tail is not None:            # 尾巴外緣 = 停損真正該讀的那個數,一定要標
+                xt = X(F + tail * d1)
+                if tail > b:
+                    P.append(f'<text x="{xt+5:.0f}" y="{y+16}" fill="#5f6a77" '
+                             f'font-size="12">{F+tail*d1:,.0f}</text>')
+                else:
+                    P.append(f'<text x="{xt-5:.0f}" y="{y+16}" fill="#5f6a77" font-size="12" '
+                             f'text-anchor="end">{F+tail*d1:,.0f}</text>')
     return (f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
             f'style="width:100%;height:auto">{"".join(P)}</svg>')
 
