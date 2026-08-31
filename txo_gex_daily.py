@@ -947,14 +947,19 @@ def _recent_table(d, n=10):
     if not zs:
         return "", None
     med = float(np.median(zs))
-    tone = ("定價<b>偏寬</b>,近期實際波動小於市場所定的價(賣方相對有利)" if med < 0.7
-            else "定價<b>偏窄</b>,近期實際波動大於市場所定的價(買方相對有利)" if med > 1.0
-            else "定價與實際大致相符")
+    # ⚠️ 這一欄是**回頭看**的,不是明天的預報。波動有聚集性 —— 安靜之後正是容易
+    #    出事的時候。舊版寫「偏寬 → 賣方相對有利」是把回顧當成前瞻,方向會誤導:
+    #    2026-08-28 那份的比值 0.39(全月最低),隔一個交易日盤中就走了 1.62σ。
+    tone = ("近期實際波動<b>小於</b>市場所定的價" if med < 0.63
+            else "近期實際波動<b>大於</b>市場所定的價" if med > 1.0
+            else "近期實際波動與定價大致相符")
     html = ("<table><tr><th>日期</th><th>TXF 收</th><th>變動</th><th>%</th>"
             "<th>近月 IV</th><th>百分位</th><th>當日定價 1&sigma;</th><th>實際/1&sigma;</th></tr>"
             + rows + "</table>"
             + f"<p class='mut' style='margin:6px 0 0'>近 {len(zs)} 日「實際/1&sigma;」中位 "
-              f"<b>{med:.2f}</b>(常態理論 0.67)&rarr; {tone}。"
+              f"<b>{med:.2f}</b>(640 天實測中位 0.63)&rarr; {tone}。"
+              "<br>⚠️ <b>這是回顧,不是明天的預報。</b>波動有聚集性,比值低只代表最近安靜,"
+              "不代表明天安全 —— 8/28 那份的比值 0.39(全月最低),隔一個交易日盤中就走了 1.62&sigma;。"
               "<br>紅字 = IV 在歷史 P90 以上;黃字 = 當日變動 &ge; 2&sigma;。</p>")
     return html, med
 
@@ -962,11 +967,29 @@ def _recent_table(d, n=10):
 def _scale_panel(gex, meta):
     """① 明天的區間 —— 報表唯一四題全過的區塊(改變決策/贏對照組/獨立/適用)。
 
-    校準全部來自實測(633 天,2024-01~2026-08,分母是前一日定價的 1σ):
-      隔日收盤變動   50% 需 ±0.63σ · 67% 需 ±0.92σ · 80% 需 ±1.25σ · 90% 需 ±1.72σ
-      隔日盤中極值   最高中位 +0.67σ · 最低中位 −0.54σ(各約半數日子會觸及)
-      停損單邊被掃   0.75σ→38.1% · 1.0σ→25.6% · 1.5σ→10.1% · 2.0σ→3.8%
-    ⚠ 1σ 本身是「收盤到收盤」;盤中振幅中位是它的 1.92 倍,所以停損要另一張表。
+    校準口徑(2026-08-31 修正,見下方「兩個舊缺陷」):
+      **只算日盤 08:45–13:45**,基準 = 前一日日盤結算價(= 報表的 F),
+      分母 = 前一日的定價 1σ。n=640(2023-12~2026-08)。
+
+      隔日收盤    50% ±0.63σ · 67% ±0.91σ · 80% ±1.22σ · 90% ±1.71σ
+      隔日最高點  P16.5 −0.15σ · 中位 +0.57σ · P83.5 +1.30σ(21.6% 的日子低於前收)
+      隔日最低點  P16.5 +0.43σ · 中位 −0.30σ · P83.5 −1.16σ(35.3% 的日子高於前收)
+      停損被掃    0.75σ→34.4% · 1.0σ→24.0% · 1.5σ→10.9% · 2.0σ→4.8%(多空合併)
+      盤中振幅 (H−L)/σ 中位 0.87σ = |收盤變動| 中位的 1.39 倍
+
+      錨在**當日 08:45 開盤**時同一組量(明早才算得出,但窄一半):
+      最高點 +0.11σ ~ +0.83σ · 最低點 −0.11σ ~ −0.79σ · 收盤 67% ±0.56σ
+      67% 區間總寬度 3.04σ → **1.40σ**;跳空本身中位 0.49σ、17.5% 的日子 >1σ。
+
+    ⚠️ **兩個舊缺陷(2026-08-31 修正)**
+      ① 基準取錯:舊版用 `group_by(date).close.last()`,polars 未定序 ⇒ 可能取到
+         夜盤收盤(05:00)而非日盤結算(13:45),與報表的 F 不同源。
+      ② 視窗不對:舊版的高低點含**前一晚夜盤**,而報表的讀者做的是早盤。
+      修正後最低點的落空率從 12.8% 變成 **35.3%** —— 舊數字讓區間看起來比實際可靠。
+
+    🔴 **這是風險尺度,不是進場訊號。** 區間說的是「最低點會落在哪」,不是
+       「跌到那裡會反彈」;趨勢日價格直接穿過整段繼續走。實測:640 天裡 127 天
+       觸及 −1σ,其中 **57.5% 當日收盤仍在 −1σ 之下**。
     """
     iv = gex.get("front_iv"); F = meta.get("fut_front") or 0
     if not (iv and iv > 0 and F):
@@ -997,36 +1020,54 @@ def _scale_panel(gex, meta):
            "<table style='margin-top:10px'>"
            "<tr><th>明日</th><th>區間</th><th>寬度</th><th>依據</th></tr>"
            f"<tr><td><b>收盤(67%)</b></td>"
-           f"<td style='text-align:right'><b style='font-size:19px'>{F-0.92*d1:,.0f} – {F+0.92*d1:,.0f}</b></td>"
-           f"<td style='text-align:right'>&plusmn;{0.92*d1:,.0f}</td><td class='mut'>&plusmn;0.92&sigma;</td></tr>"
+           f"<td style='text-align:right'><b style='font-size:19px'>{F-0.91*d1:,.0f} – {F+0.91*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>&plusmn;{0.91*d1:,.0f}</td><td class='mut'>&plusmn;0.91&sigma;</td></tr>"
            f"<tr><td>收盤(80%)</td>"
-           f"<td style='text-align:right'>{F-1.25*d1:,.0f} – {F+1.25*d1:,.0f}</td>"
-           f"<td style='text-align:right'>&plusmn;{1.25*d1:,.0f}</td><td class='mut'>&plusmn;1.25&sigma;</td></tr>"
+           f"<td style='text-align:right'>{F-1.22*d1:,.0f} – {F+1.22*d1:,.0f}</td>"
+           f"<td style='text-align:right'>&plusmn;{1.22*d1:,.0f}</td><td class='mut'>&plusmn;1.22&sigma;</td></tr>"
            f"<tr><td><b>最高點(67%)</b></td>"
-           f"<td style='text-align:right'><b>{F+0.15*d1:,.0f} – {F+1.30*d1:,.0f}</b></td>"
-           f"<td style='text-align:right'>中位 {F+0.67*d1:,.0f}</td>"
-           f"<td class='mut'>+0.15&sigma; ~ +1.30&sigma;</td></tr>"
+           f"<td style='text-align:right'><b>{F-0.15*d1:,.0f} – {F+1.30*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>中位 {F+0.57*d1:,.0f}</td>"
+           f"<td class='mut'>落空 21.6%</td></tr>"
            f"<tr><td><b>最低點(67%)</b></td>"
-           f"<td style='text-align:right'><b>{F-1.27*d1:,.0f} – {F-0.05*d1:,.0f}</b></td>"
-           f"<td style='text-align:right'>中位 {F-0.54*d1:,.0f}</td>"
-           f"<td class='mut'>&minus;1.27&sigma; ~ &minus;0.05&sigma;</td></tr>"
+           f"<td style='text-align:right'><b>{F-1.16*d1:,.0f} – {F+0.43*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>中位 {F-0.30*d1:,.0f}</td>"
+           f"<td class='mut'>落空 35.3%</td></tr>"
            "</table>"
-           "<p class='mut' style='margin:8px 0 0'>基準 = 今日 TXF 收盤 "
-           f"<b>{F:,.0f}</b>。全部校準自 641 天實測(非常態假設)。"
-           "<br>⚠️ 最高點有 <b>7.0%</b> 的日子低於前收(整天沒過前收)、"
-           "最低點有 <b>12.8%</b> 的日子高於前收(整天沒破前收)—— 單邊行情時區間會整段落空。</p></div>")
+           "<p class='mut' style='margin:8px 0 0'>基準 = 今日日盤結算 "
+           f"<b>{F:,.0f}</b>,只算<b>明日日盤 08:45–13:45</b>。校準自 640 天實測(非常態假設)。"
+           "<br>「落空」= 該區間整段沒發生的比例:最高點有 <b>21.6%</b> 的日子低於前收、"
+           "最低點有 <b>35.3%</b> 的日子高於前收 —— 隔夜跳空把價格帶走就不會回來。</p>"
+           "<div class='panel' style='margin-top:10px;background:#101820'>"
+           "<b>明早 08:45 開盤後改用這組,區間會窄一半</b>"
+           "<span class='mut' style='font-size:14px'> — 隔夜的不確定性已經實現,不必再付它的錢</span>"
+           f"<div style='margin-top:6px;font-size:16px'>把開盤價記作 <b>O</b>(σ 仍用上面的 "
+           f"<b>{d1:,.0f}</b> 點):<br>"
+           f"　最高點 67% = <b>O+{0.11*d1:,.0f}</b> ~ <b>O+{0.83*d1:,.0f}</b>　·　"
+           f"最低點 67% = <b>O&minus;{0.79*d1:,.0f}</b> ~ <b>O&minus;{0.11*d1:,.0f}</b><br>"
+           "<span class='mut'>67% 區間總寬度 3.04&sigma; &rarr; 1.40&sigma;;開盤必在當日高低之間,"
+           "所以沒有「落空」這回事。跳空本身中位 0.49&sigma;、17.5% 的日子 &gt;1&sigma;。</span></div></div>"
+           "<div class='panel' style='margin-top:10px;border-color:#ef5350;background:#2a1618'>"
+           "<b class='neg'>🔴 這是風險尺度,不是進場訊號</b>"
+           "<div style='margin-top:6px;font-size:15px'>區間說的是「最低點會落在哪」,"
+           "<b>不是「跌到那裡會反彈」</b> —— 趨勢日價格直接穿過整段繼續走。<br>"
+           "實測:640 天裡有 127 天觸及 &minus;1&sigma;,其中 <b>57.5% 當日收盤仍在 &minus;1&sigma; 之下</b>。"
+           "</div></div></div>")
 
-    STOP = [(0.75, 38.1), (1.00, 25.6), (1.50, 10.1), (2.00, 3.8)]
+    STOP = [(0.75, 34.4), (1.00, 24.0), (1.50, 10.9), (2.00, 4.8)]
     srow = "".join(
         f"<tr><td>{k:.2f}&sigma;</td><td style='text-align:right'><b>{k*d1:,.0f} 點</b></td>"
         f"<td style='text-align:right'>{k*d1*10:,.0f}</td>"
         f"<td style='text-align:right'>{k*d1*50:,.0f}</td>"
-        f"<td style='text-align:right'{chr(32)+chr(115)+'tyle=color:#ef5350' if pc>30 else ''}>{pc:.1f}%</td></tr>"
+        + (f"<td style='text-align:right;color:#ef5350'>{pc:.1f}%</td>" if pc > 30
+           else f"<td style='text-align:right'>{pc:.1f}%</td>")
+        + f"<td style='text-align:right' class='mut'>每 {100/pc:.1f} 日一次</td></tr>"
         for k, pc in STOP)
     stop = ("<div class='panel'><b>停損寬度 → 當日被掃到的機率</b>"
-            "<span class='mut' style='font-size:14px'> — 單邊最大不利偏移,633 天 &times; 多空兩邊</span>"
+            "<span class='mut' style='font-size:14px'> — 單邊最大不利偏移,640 天 &times; 多空合併"
+            "(只算日盤)</span>"
             "<table><tr><th>寬度</th><th>點數</th><th>微台(元)</th><th>小台(元)</th>"
-            "<th>被掃機率</th></tr>" + srow + "</table></div>")
+            "<th>被掃機率</th><th>頻率</th></tr>" + srow + "</table></div>")
     info = {"iv": iv, "pct": pct, "d1": d1, "F": F}
     return warn + rng + stop, info
 
@@ -1261,8 +1302,8 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
         _F = _si["F"]
         d1_v = f"{_F-0.92*_d1:,.0f} – {_F+0.92*_d1:,.0f}"
         d1_sub = (f"&plusmn;{0.92*_d1:,.0f} 點 · 微台一口日風險 {_d1*10:,.0f} 元"
-                  f"<br>最高點 {_F+0.15*_d1:,.0f}–{_F+1.30*_d1:,.0f} · "
-                  f"最低點 {_F-1.27*_d1:,.0f}–{_F-0.05*_d1:,.0f}")
+                  f"<br>最高點 {_F-0.15*_d1:,.0f}–{_F+1.30*_d1:,.0f} · "
+                  f"最低點 {_F-1.16*_d1:,.0f}–{_F+0.43*_d1:,.0f}")
     else:
         iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
     if _rmed is not None:
@@ -1393,7 +1434,8 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="panel" style="border-color:#3a4553">
 <b style="font-size:18px">怎麼看(三步,依可靠度排序)</b>
 <div style="margin-top:8px;font-size:16px;line-height:1.9">
-<b>1. 明天的區間</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。IV 在 P90 以上就縮手,不要猜方向。<br>
+<b>1. 明天的區間</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。IV 在 P90 以上就縮手,不要猜方向。
+<span class="neg">這是風險尺度,<b>不是進場訊號</b> —— 區間下緣不等於買點。</span><br>
 <b>2. 結算日區間</b> &rarr; 週三/週五結算的落點;要賣選擇權就賣在區間外。<br>
 <b>3. 結構觀察</b> &rarr; <span class="mut">只當背景。符號約 3/4 的日子是錯的、牆在價格空間不存在,
 別拿它決定進出場。</span>
