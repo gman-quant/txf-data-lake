@@ -69,6 +69,7 @@ LOGDIR = TXO_ROOT / "logs"
 
 MB, ME = "<!-- MORNING-BEGIN -->", "<!-- MORNING-END -->"
 L1B, L1E = "<!-- L1-BEGIN -->", "<!-- L1-END -->"
+L0B, L0E = "<!-- L0-BEGIN -->", "<!-- L0-END -->"
 OB, OE = "<!-- OPEN-BEGIN -->", "<!-- OPEN-END -->"
 SLOT = "<!-- MORNING-SLOT -->"
 OSLOT = "<!-- OPEN-SLOT -->"
@@ -392,7 +393,7 @@ def build_morning_block(fc, night, target, weekend):
         f"σ′ = <b>{sp_raw:,.0f}</b> 點(σ 的 {sp_raw / sigma:.2f} 倍)· "
         f"收盤 67% 帶寬 &plusmn;{old_w / 2:,.0f} &rarr; <b>&plusmn;{new_w / 2:,.0f}</b>"
         f"({(new_w / old_w - 1) * 100:+.0f}%)</div>"
-        + svg + _lane_legend(actual=True) + warn + card
+        + svg + _lane_legend(actual=True, oldband=True) + warn + card
         + f"<p class='mut' style='margin:6px 0 0'>來源 fc_{fc['date'].replace('-', '')}.json"
         f"(14:25 凍結)· 夜盤 5m {night['bars']}/{CALIB['EXP_BARS']} 根"
         f"({night['src']},至 {night['last_ts'][11:16]})· 夜盤 RV {night['rv_pts']:,.0f} 點"
@@ -448,6 +449,7 @@ def _collapse_span(html, b, e, summary):
             + inner + "</details>\n" + html[j:])
 
 
+SUM_L0 = "⓪ 今日日盤回顧(開盤定稿 vs 實際)— 點開對照"
 SUM_L1 = "📋 14:25 收盤版預測(今晚夜盤 + 明日日盤)— 已被上方更新取代,點開對照"
 SUM_MORNING = "🌅 05:05 早報(夜盤計分板 + 日盤重錨)— 已被開盤定稿取代,點開對照"
 
@@ -471,6 +473,8 @@ def write_report(fc_date, block, begin=MB, end=ME, slot=SLOT, collapse=()):
     if not fp.exists():
         raise Abort(f"{fp.name} 不存在")
     html = splice(fp.read_text(encoding="utf-8"), block, begin, end, slot)
+    if "l0" in collapse:
+        html = _collapse_span(html, L0B, L0E, SUM_L0)
     if "l1" in collapse:
         html = _collapse_span(html, L1B, L1E, SUM_L1)
     if "morning" in collapse:
@@ -557,7 +561,7 @@ def run_night(target, source, dry):
         print(json.dumps({k: v for k, v in rec.items() if k != "fc"},
                          ensure_ascii=False, indent=1))
         return True
-    fp = write_report(fc_date, block, collapse=("l1",))
+    fp = write_report(fc_date, block, collapse=("l0", "l1"))
     append_history(rec)
     write_state(True, "", extra={"last_target": target.isoformat(),
                                  "sigma_prime": rec["sigma_prime"], "mode": rec["mode"],
@@ -578,6 +582,8 @@ def _morning_record(target):
                 try:
                     r = json.loads(line)
                 except Exception:
+                    continue
+                if r.get("kind") == "open":
                     continue
                 if r.get("target") == target.isoformat():
                     rec = r
@@ -602,7 +608,10 @@ def run_open(target, dry, source="kafka"):
         print(f"O={O:,.0f} 尺={sp:,.0f} spec={key}")
         return True
     fp = write_report(fc_date, block, begin=OB, end=OE, slot=OSLOT,
-                      collapse=("l1", "morning"))
+                      collapse=("l0", "l1", "morning"))
+    append_history({"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "kind": "open",
+                    "target": target.isoformat(), "O": O, "sigma_used": round(sp, 2),
+                    "spec": key, "fc_date": fc_date.isoformat()})
     write_state(True, "", mode="open")
     print(f"[OK] 開盤定稿 {target} O={O:,.0f}({key})→ {fp.name}")
     return True

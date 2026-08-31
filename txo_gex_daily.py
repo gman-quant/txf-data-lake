@@ -1103,7 +1103,7 @@ def _svg_lanes(anchor, scale, sections, w=880):
             f'style="width:100%;height:auto">{"".join(P)}</svg>')
 
 
-def _lane_legend(actual=False):
+def _lane_legend(actual=False, oldband=False):
     """泳道圖的色塊圖例(2026-09-01 使用者反映看不懂顏色/找不到價格)。"""
     parts = ["<span style='color:#ef5350'>■</span>最高點",
              "<span style='color:#7f8ea3'>■</span>收盤",
@@ -1112,6 +1112,7 @@ def _lane_legend(actual=False):
              "<span style='color:#f5d90a'>┊</span>錨點"]
     if actual:
         parts.insert(3, "◆白=實際發生值")
+    if oldband:
         parts.append("<span style='color:#5a6470'>■</span>舊收盤帶=14:25 版")
     return ("<p class='mut' style='margin:6px 0 0'>" + " · ".join(parts)
             + " · 帶端數字=確切價格,<b>滑鼠停在帶上看完整數值</b></p>")
@@ -1136,6 +1137,80 @@ def _card_html(title, spec, unit, note):
         f"最低 67% <b>{f(lo[3])} ~ {f(lo[2])}</b>(中位 {f(lo[1])})· 90% 外緣 {f(lo[0])}<br>"
         f"收盤 67% <b>O&plusmn;{spec['cl67']*unit:,.0f}</b> · 90% O&plusmn;{spec['cl90']*unit:,.0f}"
         "</div></div>")
+
+
+def _history_scale_for(target):
+    """複刻 run_open 的尺解析:morning_history 有 target 的早報 → (σ′, card_sprime);
+    否則退最新一份 fc 的 σ → card_sigma。回 (sp, spec_key) 或 (None, None)。
+
+    刻意**重算而不解析 HTML**:O、σ′、係數都是凍結/確定性的 ⇒ 與 08:46 當時
+    逐位元同一組數字,而且全年歷史可一次回填。"""
+    rec = None
+    hp = TXO_ROOT / "logs" / "morning_history.jsonl"
+    try:
+        with hp.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("kind") == "open":
+                    continue
+                if r.get("target") == target.isoformat() and r.get("sigma_prime"):
+                    rec = r
+    except OSError:
+        pass
+    if rec:
+        return float(rec["sigma_prime"]), "card_sprime"
+    tgt = target.strftime("%Y%m%d")
+    fcs = sorted((TXO_ROOT / "forecast").glob("fc_*.json"))
+    prev = [f for f in fcs if f.stem[3:] < tgt]
+    if not prev:
+        return None, None
+    try:
+        return float(json.loads(prev[-1].read_text(encoding="utf-8"))["sigma"]), "card_sigma"
+    except Exception:
+        return None, None
+
+
+def _day_review(d):
+    """⓪ 今日日盤回顧:今早 08:46 開盤定稿的帶 vs 今天實際 OHLC(計分)。
+
+    14:25 時湖已有今日日盤(13:50 sync);湖沒有 → 一行說明,不擋 ①。"""
+    try:
+        fs = kbar_paths("1d", "TXF", d, d)
+        k = (pl.read_parquet(fs).with_columns(pl.col("date").cast(pl.Utf8))
+             .filter((pl.col("date") == d.isoformat()) & (pl.col("session") == "Day")))
+    except Exception:
+        k = None
+    if k is None or not k.height:
+        return ("<h2>⓪ 今日日盤回顧</h2><p class='mut'>湖中尚無今日日盤資料"
+                "(13:50 sync 未完成?)—— 略過回顧,不影響下方預測。</p>")
+    O, H, L, C = (float(k[c][0]) for c in ("open", "high", "low", "close"))
+    sp, key = _history_scale_for(d)
+    if sp is None:
+        return ""                                     # 樣本最早幾天沒有前一份 fc,靜默略過
+    spec = CALIB[key]
+    hi, lo = spec["hi"], spec["lo"]
+    lanes = [("最高點", "#ef5350", hi[0], hi[1], hi[2], None, hi[3]),
+             ("收盤", "#7f8ea3", -spec["cl67"], 0.0, spec["cl67"],
+              -spec["cl90"], spec["cl90"]),
+             ("最低點", "#26a69a", lo[3], lo[1], lo[2], lo[0], None)]
+    svg = _svg_lanes(O, sp, [{"label": "今日日盤", "time": f"錨 = 開盤 {O:,.0f}",
+                              "lanes": lanes,
+                              "marks": [(0, H), (1, C), (2, L)]}])
+    hits = [O + hi[0] * sp <= H <= O + hi[2] * sp,
+            O - spec["cl67"] * sp <= C <= O + spec["cl67"] * sp,
+            O + lo[3] * sp <= L <= O + lo[2] * sp]
+    sc = ["✅" if h else "❌" for h in hits]
+    return (
+        "<h2>⓪ 今日日盤回顧 <span class='mut'>— 今早開盤定稿的預測 vs 實際</span></h2>"
+        "<div class='panel'>"
+        f"<div style='font-size:16px'>O <b>{O:,.0f}</b> · "
+        f"高 {H:,.0f} {sc[0]} · 收 {C:,.0f} {sc[1]} · 低 {L:,.0f} {sc[2]}"
+        f"<span class='mut'> · 尺 = {'σ′' if key == 'card_sprime' else 'σ(無早報,備援)'}"
+        f" {sp:,.0f} 點(與 08:46 同一組)· ✅ = 落在 67% 帶內</span></div>"
+        + svg + _lane_legend(actual=True) + "</div>")
 
 
 def _scale_panel(gex, meta):
@@ -1438,6 +1513,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
 
     # ── 結算區間 ─────────────────────────────────────────────────────
     warn_html, rng_html, _si = _scale_panel(gex, meta)
+    review_html = _day_review(d)             # ⓪ 今日回顧(2026-09-01 使用者拍板,預設展開)
     recent_html, _rmed = _recent_table(d)
     # ── 三張決策卡的值 ────────────────────────────────────────────
     if _si:
@@ -1562,6 +1638,9 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
 <!-- OPEN-SLOT -->
 <!-- MORNING-SLOT -->
 {warn_html}
+<!-- L0-BEGIN -->
+{review_html}
+<!-- L0-END -->
 <!-- L1-BEGIN -->
 <h2>① 今晚與明天 <span class="mut">— 高/低/收區間 · 停損 · 開盤換算卡</span></h2>
 
