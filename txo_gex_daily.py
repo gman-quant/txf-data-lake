@@ -1064,6 +1064,35 @@ def _scale_panel(gex, meta):
              f"({SESS_BANDS[0]['whiff'][0]:.1f}% / {SESS_BANDS[0]['whiff'][1]:.1f}%);"
              "日盤隔著一整段夜盤才開始,錨點常常整段沒被碰到"
              f"({SESS_BANDS[1]['whiff'][0]:.1f}% / {SESS_BANDS[1]['whiff'][1]:.1f}%)。</p>"
+             "<div class='panel' style='margin-top:10px;background:#181310;border-color:#5a4a30'>"
+             "<b>⚠️ 67% 的帶子<u>本來就每 6 天破一次</u> —— 停損不要設在它的邊上</b>"
+             "<div style='margin-top:6px;font-size:15px'>圖上每條帶子外的淡色尾巴 = 從 67% 延伸到 "
+             "<b>90% 涵蓋</b>。要放停損就用外緣,不要用實心帶的邊。<br>"
+             "<table style='margin-top:6px'><tr><th>盤段</th><th>涵蓋</th><th>最高點上緣</th>"
+             "<th>最低點下緣</th><th>破了之後還會再走</th></tr>"
+           + "".join(
+               f"<tr><td rowspan='3' style='border-top:2px solid #2a323d'><b>{s['label']}</b></td>"
+               f"<td style='border-top:2px solid #2a323d'>67%</td>"
+               f"<td style='text-align:right;border-top:2px solid #2a323d'>{_pt(s['hi'][2])}</td>"
+               f"<td style='text-align:right;border-top:2px solid #2a323d'>{_pt(s['lo'][0])}</td>"
+               f"<td rowspan='3' style='border-top:2px solid #2a323d;font-size:14px' class='mut'>"
+               f"向下 中位 +{s['over']['down'][0]*d1:,.0f} 點 · P90 <b class='neg'>+{s['over']['down'][1]*d1:,.0f}</b> · "
+               f"史上最大 +{s['over']['down'][2]*d1:,.0f}<br>"
+               f"向上 中位 +{s['over']['up'][0]*d1:,.0f} 點 · P90 +{s['over']['up'][1]*d1:,.0f} · "
+               f"史上最大 +{s['over']['up'][2]*d1:,.0f}</td></tr>"
+               f"<tr><td>80%</td><td style='text-align:right'>{_pt(s['hi80'])}</td>"
+               f"<td style='text-align:right'>{_pt(s['lo80'])}</td></tr>"
+               f"<tr><td><b>90%</b></td><td style='text-align:right'><b>{_pt(s['hi90'])}</b></td>"
+               f"<td style='text-align:right'><b>{_pt(s['lo90'])}</b></td></tr>"
+               for s in SESS_BANDS)
+           + "</table>"
+             "<p class='mut' style='margin:6px 0 0'>🔒 <b>突破哪一天會發生,事先看不出來。</b>"
+             "按前一日 IV 百分位分組,日盤跌破 67% 下緣的比率是 19.6% / 12.5% / 17.2% / 14.1%"
+             "(P0-50 / P50-80 / P80-90 / P90+),全期基準 16.7% —— 無單調關係、全部貼著基準。"
+             "σ 已經把 IV 體制正規化掉了,所以<b>只能靠部位與停損寬度承受,不能靠挑日子迴避</b>。"
+             "<br>⚠️ 向下的尾巴比向上肥得多:日盤破了之後 P90 還要再走 "
+             f"<b class='neg'>{SESS_BANDS[1]['over']['down'][1]*d1:,.0f} 點</b>(向上只有 "
+             f"{SESS_BANDS[1]['over']['up'][1]*d1:,.0f} 點)。</p></div></div>"
              "<div class='panel' style='margin-top:10px;background:#101820'>"
              "<b>明日日盤:換一個更晚的錨點會窄很多</b>"
              "<span class='mut' style='font-size:14px'> — 隔夜跳空佔了收盤變異的 <b>64%</b>,"
@@ -1115,11 +1144,22 @@ def _scale_panel(gex, meta):
 SESS_BANDS = [
     {"key": "night", "label": "今晚夜盤", "time": "15:00 – 05:00",
      "hi": (+0.15, +0.44, +0.86), "lo": (-0.89, -0.37, -0.06),
-     "cl67": 0.64, "cl80": 0.81, "whiff": (4.8, 9.4), "rng": 0.88},
+     "cl67": 0.64, "cl80": 0.81, "whiff": (4.8, 9.4), "rng": 0.88,
+     "hi80": +1.04, "hi90": +1.30, "lo80": -1.13, "lo90": -1.54,
+     "over": {"down": (0.31, 1.17, 6.93), "up": (0.23, 0.73, 1.24)}},
     {"key": "day", "label": "明日日盤", "time": "08:45 – 13:45",
-     "hi": (-0.15, +0.57, +1.30), "lo": (-1.16, -0.30, +0.43),
-     "cl67": 0.91, "cl80": 1.22, "whiff": (21.6, 35.3), "rng": 0.87},
+     "hi": (-0.15, +0.57, +1.30), "lo": (-1.17, -0.30, +0.43),
+     "cl67": 0.91, "cl80": 1.22, "whiff": (21.6, 35.3), "rng": 0.87,
+     "hi80": +1.57, "hi90": +1.92, "lo80": -1.55, "lo90": -2.04,
+     "over": {"down": (0.50, 2.52, 4.75), "up": (0.36, 1.23, 3.43)}},
 ]
+
+#: 🔒 **突破率不可預測**(2026-08-31 實測,n=641)。按前一日 IV 百分位分組,
+#: 日盤跌破 67% 下緣的比率是 19.6% / 12.5% / 17.2% / 14.1%(P0-50 / P50-80 /
+#: P80-90 / P90+),全期基準 16.7% —— 無單調關係、全部貼著基準。
+#: 這其實是好性質:σ 已經把 IV 體制正規化掉了,殘差與體制無關 ⇒ 帶子跨體制校準良好。
+#: 但同時也是壞消息:**你無法事先知道哪一天會突破**,所以「怎麼處理突破」
+#: 只能靠部位與停損寬度,不能靠挑日子。
 
 #: 明日日盤改用更晚的錨點會窄多少(同一組 640 天)。
 #: 隔夜跳空佔了收盤變異的 64%,而它在你進場時已經實現完畢 —— 這張表就是那件事的價碼。
@@ -1138,13 +1178,14 @@ def _svg_session_bands(F, d1, w=880):
     為什麼是泳道不是疊圖:三個量的區間會互相重疊(日盤的最低點區間上緣 +0.43σ
     比最高點區間下緣 −0.15σ 還高),疊在同一條線上讀不出來哪個是哪個。
     """
-    lanes = []                                   # (row_i, 名稱, 顏色, a, mid, b)
+    # (row_i, 名稱, 顏色, 67%下, 中位, 67%上, 90%尾巴的外緣 or None)
+    lanes = []
     for i, s in enumerate(SESS_BANDS):
-        lanes.append((i, "最高點", "#ef5350", s["hi"][0], s["hi"][1], s["hi"][2]))
-        lanes.append((i, "收盤", "#7f8ea3", -s["cl67"], 0.0, s["cl67"]))
-        lanes.append((i, "最低點", "#26a69a", s["lo"][0], s["lo"][1], s["lo"][2]))
-    lo = min(l[3] for l in lanes) * d1 + F
-    hi = max(l[5] for l in lanes) * d1 + F
+        lanes.append((i, "最高點", "#ef5350", s["hi"][0], s["hi"][1], s["hi"][2], s["hi90"]))
+        lanes.append((i, "收盤", "#7f8ea3", -s["cl67"], 0.0, s["cl67"], None))
+        lanes.append((i, "最低點", "#26a69a", s["lo"][0], s["lo"][1], s["lo"][2], s["lo90"]))
+    lo = min(min(l[3], l[6] if l[6] is not None else l[3]) for l in lanes) * d1 + F
+    hi = max(max(l[5], l[6] if l[6] is not None else l[5]) for l in lanes) * d1 + F
     pad = (hi - lo) * 0.08
     lo, hi = lo - pad, hi + pad
     L, R = 76, w - 16
@@ -1172,11 +1213,16 @@ def _svg_session_bands(F, d1, w=880):
         P.append(f'<text x="8" y="{y0+16}" fill="#e6e8eb" font-size="15" font-weight="bold">'
                  f'{s["label"]}</text>'
                  f'<text x="{8 + 68}" y="{y0+16}" fill="#5a6470" font-size="12">{s["time"]}</text>')
-        for k, (ri, name, col, a, mid, b) in enumerate([l for l in lanes if l[0] == i]):
+        for k, (ri, name, col, a, mid, b, tail) in enumerate([l for l in lanes if l[0] == i]):
             y = y0 + HEAD + k * (LANE_H + LANE_G)
             xa, xb, xm = X(F + a * d1), X(F + b * d1), X(F + mid * d1)
             P.append(f'<text x="{L-8}" y="{y+15}" fill="#9aa3ad" font-size="13" '
                      f'text-anchor="end">{name}</text>')
+            if tail is not None:            # 67% → 90% 涵蓋的尾巴(淡)
+                xt = X(F + tail * d1)
+                t0, t1 = (xb, xt) if tail > b else (xt, xa)
+                P.append(f'<rect x="{t0:.0f}" y="{y+5}" width="{max(t1-t0,1):.0f}" '
+                         f'height="{LANE_H-10}" fill="{col}" opacity="0.11" rx="2"/>')
             P.append(f'<rect x="{xa:.0f}" y="{y}" width="{max(xb-xa,2):.0f}" height="{LANE_H}" '
                      f'fill="{col}" opacity="0.28" rx="3"/>')
             P.append(f'<line x1="{xm:.0f}" y1="{y}" x2="{xm:.0f}" y2="{y+LANE_H}" '
