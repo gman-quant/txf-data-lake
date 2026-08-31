@@ -501,15 +501,13 @@ def compute_gex(series, S, beta=1.0):
     front_iv = ts_rows[0]["iv"] if ts_rows else None
     day_move = front_iv * math.sqrt(1 / 252.0) * 100 if front_iv else None
 
-    # ── 結算區間預估(唯一通過對照組檢驗的結算工具)──────────────────
-    #   用近月的 parity 遠期價 + ATM IV 換算 σ 區間。
-    #   實測校準(2024-01~2026-08,173 個剩 1 日的週選觀測,結算價=TSE 09:00–09:14 均值):
-    #     ±0.5σ 43.4% · ±0.8σ 67.1% · ±1.0σ 81.5%  ← 理論值 38.3/57.6/68.3
-    #     ⇒ 選擇權替結算定的區間**偏寬**,想要 ~68% 把握用 0.8σ 就夠。
-    #   ⚠ 固定點數會失效:同一個「±200 點」2025 上半年命中 76.8%、2025-07 後掉到 42.3%
-    #     (1σ 中位由 244 → 341 點)。**用 σ,不要用點數。**
-    #   ⚠ 結算價以**現貨指數**計算 → 這個區間是指數點位,不是 TXF 點位。
-    CAL = {1: (43.4, 67.1, 81.5), 3: (41.5, None, 79.2), 5: (40.0, None, 75.0)}
+    # ── 結算區間預估 ──────────────────────────────────────────────
+    #   σ_T = 各到期 ATM IV·√(Td/365)·parity 遠期。**分天期**校準(CALIB["settle_td"];
+    #   n=2,001 個觀測日×到期,2024-01~2026-08,結算價 = TSE 09:00–09:14 均值):
+    #     剩 1-3 日 67%→±0.64σ_T · 90%→±1.07σ_T;4-8 日 ±0.82/±1.39;9-25 日 ±0.88/±1.40
+    #   短天期需要的倍數較小 = VRP(隱含系統性大於實現);z 中位 +0.28 偏上,**刻意不押**
+    #   (漂移不進係數 —— 它是唯一會翻號的量)。
+    #   ⚠ 固定點數會失效(1σ 中位 244→341 點漂移);⚠ 結算以**現貨**計 → 區間是指數點位。
     _WD = "一二三四五六日"
     settles = []
     for tr in ts_rows[:3]:
@@ -517,16 +515,17 @@ def compute_gex(series, S, beta=1.0):
             continue
         f0, iv0, td0 = tr["fwd"], tr["iv"], tr["Td"]
         sg = iv0 * math.sqrt(td0 / 365.0) * f0
-        k = min(CAL, key=lambda x: abs(x - td0))
+        m67, m90 = next(((a, b) for lim, a, b in CALIB["settle_td"] if td0 <= lim),
+                        CALIB["settle_td"][-1][1:])
         try:
             wd = _WD[date.fromisoformat(tr["date"]).weekday()]
         except Exception:
             wd = "?"
         settles.append({"code": tr["code"], "date": tr["date"], "wd": wd, "Td": td0,
                         "fwd": f0, "iv": iv0, "sigma": sg, "oi": tr["oi"],
-                        "cal_far": (td0 > 6),
-                        "b08": (f0 - 0.8 * sg, f0 + 0.8 * sg, CAL[k][1]),
-                        "b10": (f0 - sg, f0 + sg, CAL[k][2])})
+                        "q67": (f0 - m67 * sg, f0 + m67 * sg),
+                        "q90": (f0 - m90 * sg, f0 + m90 * sg),
+                        "m67": m67, "m90": m90})
     settle = settles[0] if settles else None
 
     # ── 集中度(sign-free:用 |GEX| 佔比,不受符號慣例影響)──────────
@@ -957,41 +956,174 @@ def _recent_table(d, n=10):
             "<th>近月 IV</th><th>百分位</th><th>當日定價 1&sigma;</th><th>實際/1&sigma;</th></tr>"
             + rows + "</table>"
             + f"<p class='mut' style='margin:6px 0 0'>近 {len(zs)} 日「實際/1&sigma;」中位 "
-              f"<b>{med:.2f}</b>(640 天實測中位 0.63)&rarr; {tone}。"
+              f"<b>{med:.2f}</b>(長期中位 0.63)&rarr; {tone}。"
               "<br>⚠️ <b>這是回顧,不是明天的預報。</b>波動有聚集性,比值低只代表最近安靜,"
               "不代表明天安全 —— 8/28 那份的比值 0.39(全月最低),隔一個交易日盤中就走了 1.62&sigma;。"
               "<br>紅字 = IV 在歷史 P90 以上;黃字 = 當日變動 &ge; 2&sigma;。</p>")
     return html, med
 
 
-def _scale_panel(gex, meta):
-    """① 明天的區間 —— 報表唯一四題全過的區塊(改變決策/贏對照組/獨立/適用)。
+# ── ① 區間校準(CALIB)────────────────────────────────────────────
+#: 2026-08-31 重校準,產出腳本 scratchpad/calib_final.py(凍結副本 calib.json)。
+#: 樣本 2020-03-26~2026-08-31(n=1554,**含 2022 空頭年**),分位數以 RV20 正規化量測,
+#: 生產時套在選擇權 IV 的一日 1σ 上。可移植依據:形狀對 σ 來源不敏感 ——
+#: IV 樣本(n=640)與長樣本同名分位差 ≤0.13σ;NR_MED 兩尺各 0.5676/0.5636 幾乎相同。
+#: 元組 = 相對錨點的帶號 σ 倍數。hi:(67%淺緣, 中位, 67%遠緣, 90%外緣);
+#: lo:(90%外緣, 中位, 67%淺緣, 67%深緣)—— 取用一律經 _lanes_from / _card_html,別手拆。
+#:
+#: 🔒 只顯示 67 與 90 兩檔:95% 起邊界 bootstrap SE 佔比 >10%(±292 點),看起來準其實抖;
+#:    覆蓋誤差來源是體制漂移不是估計(隨機切 <3pp、時間切 5.6pp),多一檔不會更知道明天。
+#: 🔒 收盤帶刻意對稱:漂移是唯一會翻號的量(2022 年 −0.16 vs 其餘年 +0.06~+0.23);
+#:    不對稱帶樣本外把失誤集中在會虧錢那側(2022 下緣外 24.1% vs 對稱 21.2%)。
+#: 🔒 突破哪天發生不可預測:按前日 IV 百分位分組,日盤跌破 67% 下緣
+#:    19.6/12.5/17.2/14.1%(P0-50/50-80/80-90/90+),全期 16.7%,無單調。
+#: 🔒 滾動 250 日自適應已測、否決(覆蓋 65.5% vs 固定 66.5%)。
+#: 🔒 σ′(早報混合尺)= σ·√(1−W + W·(nr/NR_MED)²),nr = 夜盤RV(5m)÷σ,一次齊次。
+#:    W=0.6 由兩條獨立路收斂:MMSE 組合權重 0.581、帶寬校準掃描 0.6~0.7。
+#:    夜盤 RV 效率高於振幅(Parkinson):桶間極差 6.8pp vs 7.8pp,且最適 w 較高
+#:    (更精確的估計量拿更多權重 —— 收縮理論的一致性檢核)。
+CALIB = {
+    "night": {"label": "今晚夜盤", "time": "15:00 – 05:00",
+              "hi": (+0.13, +0.42, +0.84, +1.34), "lo": (-1.49, -0.36, -0.07, -0.90),
+              "cl67": 0.61, "cl90": 1.13, "whiff_hi": 5.5, "whiff_lo": 7.7},
+    "day": {"label": "明日日盤", "time": "08:45 – 13:45",
+            "hi": (-0.15, +0.56, +1.36, +2.11), "lo": (-2.28, -0.35, +0.34, -1.29),
+            "cl67": 0.97, "cl90": 1.89, "whiff_hi": 21.5, "whiff_lo": 32.1},
+    # 早報(05:05):錨 = 夜盤收盤,尺 = σ′
+    "morning": {"hi": (+0.09, +0.45, +0.97, +1.41), "lo": (-1.63, -0.39, -0.01, -0.99),
+                "cl67": 0.66, "cl90": 1.24},
+    # 開盤換算卡:錨 = 08:45 開盤價 O。σ 版 = 14:25 印(備援/連假後);σ′ 版 = 05:05 升級。
+    # 依據:開盤價是「開盤前所有事」的充分統計量 —— 跳空大小 vs 開盤後走勢 R²=0.72%、
+    # 五個跳空分位桶覆蓋 64~69%;連假後開盤錨覆蓋 70.5% vs 夜盤錨 37.1%。
+    "card_sigma":  {"hi": (+0.13, +0.42, +0.91, +1.36), "lo": (-1.52, -0.41, -0.12, -0.97),
+                    "cl67": 0.62, "cl90": 1.18},
+    "card_sprime": {"hi": (+0.12, +0.41, +0.87, +1.28), "lo": (-1.49, -0.39, -0.12, -0.89),
+                    "cl67": 0.59, "cl90": 1.09},
+    "W": 0.6, "NR_MED": 0.5676,       # nr 中位(IV 樣本;RV 樣本 0.5636 → 尺可移植)
+    "MONDAY_X": 1.13,                 # 週六早報(產週一)帶寬乘數;95%CI [1.05,1.22]
+    "MIN_BARS": 150, "EXP_BARS": 168,  # 夜盤 5m 完整性閘:<150 根降級 Parkinson w=0.4
+    # 停損:(寬度σ, 多單被掃%, 空單被掃%, 被掃後收盤回錨點上%)。錨=今日結算。
+    # 近的停損空單較易被掃、遠的多單較易(交叉 1.5σ)——上漲用爬的、下跌用跳的。
+    "stop": [(1.0, 24.3, 29.0, 5.0), (1.5, 13.1, 13.4, 1.5), (2.0, 7.0, 6.1, 0.0)],
+    # 結算帶:(Td 上限, 67% 倍數, 90% 倍數)
+    "settle_td": [(3, 0.64, 1.07), (8, 0.82, 1.39), (99, 0.88, 1.40)],
+    "recent_med": 0.63,               # 近10日表基準:|收盤變動|/σ 的長期中位(IV 口徑)
+}
 
-    校準口徑(2026-08-31 修正,見下方「兩個舊缺陷」):
-      **只算日盤 08:45–13:45**,基準 = 前一日日盤結算價(= 報表的 F),
-      分母 = 前一日的定價 1σ。n=640(2023-12~2026-08)。
+#: 泳道緣的落空與超越(長樣本;寫進註解供口徑查考,不逐條上報表):
+#:   日盤破 67% 下緣後還會再走:中位 +0.58σ · P90 +2.05σ;上緣 +0.49/+1.39 —— 向下尾巴肥 ~1.5 倍。
 
-      隔日收盤    50% ±0.63σ · 67% ±0.91σ · 80% ±1.22σ · 90% ±1.71σ
-      隔日最高點  P16.5 −0.15σ · 中位 +0.57σ · P83.5 +1.30σ(21.6% 的日子低於前收)
-      隔日最低點  P16.5 +0.43σ · 中位 −0.30σ · P83.5 −1.16σ(35.3% 的日子高於前收)
-      停損被掃    0.75σ→34.4% · 1.0σ→24.0% · 1.5σ→10.9% · 2.0σ→4.8%(多空合併)
-      盤中振幅 (H−L)/σ 中位 0.87σ = |收盤變動| 中位的 1.39 倍
 
-      錨在**當日 08:45 開盤**時同一組量(明早才算得出,但窄一半):
-      最高點 +0.11σ ~ +0.83σ · 最低點 −0.11σ ~ −0.79σ · 收盤 67% ±0.56σ
-      67% 區間總寬度 3.04σ → **1.40σ**;跳空本身中位 0.49σ、17.5% 的日子 >1σ。
+def _svg_lanes(anchor, scale, sections, w=880):
+    """共用泳道圖(14:25 主圖與 05:05 早報同一支)。
 
-    ⚠️ **兩個舊缺陷(2026-08-31 修正)**
-      ① 基準取錯:舊版用 `group_by(date).close.last()`,polars 未定序 ⇒ 可能取到
-         夜盤收盤(05:00)而非日盤結算(13:45),與報表的 F 不同源。
-      ② 視窗不對:舊版的高低點含**前一晚夜盤**,而報表的讀者做的是早盤。
-      修正後最低點的落空率從 12.8% 變成 **35.3%** —— 舊數字讓區間看起來比實際可靠。
-
-    🔴 **這是風險尺度,不是進場訊號。** 區間說的是「最低點會落在哪」,不是
-       「跌到那裡會反彈」;趨勢日價格直接穿過整段繼續走。實測:640 天裡 127 天
-       觸及 −1σ,其中 **57.5% 當日收盤仍在 −1σ 之下**。
+    sections = [{"label","time","lanes":[(名, 色, a, med, b, tail_lo, tail_hi)],
+                 "marks":[(lane_idx, 價位)]}]
+    a/med/b 升冪、tail 各自向外(None=無),全部是相對 anchor 的 σ 倍數。
+    marks 畫「實際發生值」:白色菱形 + 數字(早報計分板用)。
+    為什麼是泳道不是疊圖:三個量的區間互相重疊(日盤最低帶上緣 +0.34σ 高於
+    最高帶下緣 −0.15σ),疊同一條線讀不出誰是誰。
     """
-    iv = gex.get("front_iv"); F = meta.get("fut_front") or 0
+    ext = []
+    for sec in sections:
+        for (_n, _c, a, _m, b, tl, th) in sec["lanes"]:
+            ext += [a, b, tl if tl is not None else a, th if th is not None else b]
+        for (_i, pr) in sec.get("marks", ()):
+            ext.append((pr - anchor) / scale)
+    lo = anchor + min(ext) * scale
+    hi = anchor + max(ext) * scale
+    pad = (hi - lo) * 0.08
+    lo, hi = lo - pad, hi + pad
+    L, R = 76, w - 16
+    X = lambda v: L + (v - lo) / (hi - lo) * (R - L)
+    LANE_H, LANE_G, HEAD = 22, 5, 26
+    heights = [HEAD + len(s["lanes"]) * (LANE_H + LANE_G) for s in sections]
+    h = 30 + sum(heights) + 6
+    P = [f'<rect x="0" y="0" width="{w}" height="{h}" fill="#0b0e13"/>']
+    step = 10 ** math.floor(math.log10((hi - lo) / 4))
+    for m in (1, 2, 5, 10):
+        if (hi - lo) / (step * m) <= 7:
+            step *= m
+            break
+    tk = math.ceil(lo / step) * step
+    while tk <= hi:
+        P.append(f'<line x1="{X(tk):.0f}" y1="20" x2="{X(tk):.0f}" y2="{h-4}" stroke="#171d25"/>'
+                 f'<text x="{X(tk):.0f}" y="14" fill="#5a6470" font-size="12" '
+                 f'text-anchor="middle">{tk:,.0f}</text>')
+        tk += step
+    P.append(f'<line x1="{X(anchor):.0f}" y1="20" x2="{X(anchor):.0f}" y2="{h-4}" '
+             f'stroke="#f5d90a" stroke-width="2" stroke-dasharray="4 3"/>')
+    y0 = 30
+    for sec, hh in zip(sections, heights):
+        P.append(f'<text x="8" y="{y0+16}" fill="#e6e8eb" font-size="15" font-weight="bold">'
+                 f'{sec["label"]}</text>'
+                 f'<text x="{8+68}" y="{y0+16}" fill="#5a6470" font-size="12">{sec.get("time","")}</text>')
+        for k, (name, col, a, med, b, tl, th) in enumerate(sec["lanes"]):
+            y = y0 + HEAD + k * (LANE_H + LANE_G)
+            xa, xb, xm = X(anchor + a * scale), X(anchor + b * scale), X(anchor + med * scale)
+            P.append(f'<text x="{L-8}" y="{y+15}" fill="#9aa3ad" font-size="13" '
+                     f'text-anchor="end">{name}</text>')
+            for tail, right in ((tl, False), (th, True)):
+                if tail is None:
+                    continue
+                xt = X(anchor + tail * scale)
+                t0, t1 = (xb, xt) if right else (xt, xa)
+                P.append(f'<rect x="{t0:.0f}" y="{y+5}" width="{max(t1-t0,1):.0f}" '
+                         f'height="{LANE_H-10}" fill="{col}" opacity="0.11" rx="2"/>')
+                anch = "" if right else ' text-anchor="end"'
+                dx = 5 if right else -5
+                P.append(f'<text x="{xt+dx:.0f}" y="{y+16}" fill="#5f6a77" font-size="12"{anch}>'
+                         f'{anchor+tail*scale:,.0f}</text>')
+            P.append(f'<rect x="{xa:.0f}" y="{y}" width="{max(xb-xa,2):.0f}" height="{LANE_H}" '
+                     f'fill="{col}" opacity="0.28" rx="3"/>')
+            P.append(f'<line x1="{xm:.0f}" y1="{y}" x2="{xm:.0f}" y2="{y+LANE_H}" '
+                     f'stroke="{col}" stroke-width="2"/>')
+            # 67% 緣的數字:朝帶內收,避免與尾巴外緣標籤打架
+            P.append(f'<text x="{xa+4:.0f}" y="{y+16}" fill="#c7ccd3" font-size="12">'
+                     f'{anchor+a*scale:,.0f}</text>'
+                     f'<text x="{xb-4:.0f}" y="{y+16}" fill="#c7ccd3" font-size="12" '
+                     f'text-anchor="end">{anchor+b*scale:,.0f}</text>')
+        for (li, pr) in sec.get("marks", ()):
+            y = y0 + HEAD + li * (LANE_H + LANE_G) + LANE_H // 2
+            xp = X(pr)
+            P.append(f'<path d="M {xp:.0f} {y-7} L {xp+6:.0f} {y} L {xp:.0f} {y+7} '
+                     f'L {xp-6:.0f} {y} Z" fill="#ffffff"/>'
+                     f'<text x="{xp:.0f}" y="{y-10}" fill="#ffffff" font-size="12" '
+                     f'font-weight="bold" text-anchor="middle">{pr:,.0f}</text>')
+        y0 += hh
+    return (f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
+            f'style="width:100%;height:auto">{"".join(P)}</svg>')
+
+
+def _lanes_from(spec):
+    """把 CALIB 的一段轉成泳道清單(高/收/低)。收盤帶雙側尾巴。"""
+    return [("最高點", "#ef5350", spec["hi"][0], spec["hi"][1], spec["hi"][2], None, spec["hi"][3]),
+            ("收盤", "#7f8ea3", -spec["cl67"], 0.0, spec["cl67"], -spec["cl90"], spec["cl90"]),
+            ("最低點", "#26a69a", spec["lo"][3], spec["lo"][1], spec["lo"][2], spec["lo"][0], None)]
+
+
+def _card_html(title, spec, unit, note):
+    """開盤換算卡。spec = CALIB['card_sigma'|'card_sprime'],unit = σ 或 σ′ 的點數。"""
+    hi, lo = spec["hi"], spec["lo"]
+    f = lambda x: f"O+{x*unit:,.0f}" if x >= 0 else f"O&minus;{-x*unit:,.0f}"
+    return (
+        "<div class='panel' style='background:#101820'>"
+        f"<b>{title}</b><span class='mut' style='font-size:14px'> — O = 08:45 開盤價;{note}</span>"
+        "<div style='margin-top:6px;font-size:16px;line-height:1.9'>"
+        f"最高 67% <b>{f(hi[0])} ~ {f(hi[2])}</b>(中位 {f(hi[1])})· 90% 外緣 {f(hi[3])}<br>"
+        f"最低 67% <b>{f(lo[3])} ~ {f(lo[2])}</b>(中位 {f(lo[1])})· 90% 外緣 {f(lo[0])}<br>"
+        f"收盤 67% <b>O&plusmn;{spec['cl67']*unit:,.0f}</b> · 90% O&plusmn;{spec['cl90']*unit:,.0f}"
+        "</div></div>")
+
+
+def _scale_panel(gex, meta):
+    """① 今晚與明天 —— 主決策區塊:兩段的高/低/收區間 + 停損 + 開盤換算卡。
+
+    設計判準(2026-09-01 使用者定調):精簡,只留**有助於交易決策**的資訊。
+    水準只有 67%(實心)與 90%(淡色)—— 依據見 CALIB 註解。
+    """
+    iv = gex.get("front_iv")
+    F = meta.get("fut_front") or 0
     if not (iv and iv > 0 and F):
         return "<p class='mut'>(近月 IV 不足,無法估區間)</p>", None
     pct = None
@@ -1009,212 +1141,73 @@ def _scale_panel(gex, meta):
     if pct is not None and pct >= 90:
         warn = ("<div class='panel' style='border-color:#ef5350;background:#2a1618'>"
                 f"<span class='neg' style='font-size:19px'><b>⚠️ IV 在歷史 P{pct:.0f} —— 高波動體制</b></span>"
-                "<div style='margin-top:6px;font-size:16px'>實測:IV 最高 10% 的日子,隔日 |變動| 中位 "
-                "<b>1.63%</b>、P90 <b>4.53%</b>(vs 最低 25% 的 0.55% / 1.58%)。"
+                "<div style='margin-top:6px;font-size:16px'>IV 最高 10% 的日子,隔日 |變動| 中位 "
+                "<b>1.63%</b>、P90 <b>4.53%</b>(vs 最低 25%:0.55%/1.58%)。"
                 "<br><b>縮部位、放寬或退出停損、此時賣選擇權最危險</b> —— 三件事都不必猜方向。</div></div>")
 
-    def _pt(x):
-        return f"{F + x * d1:,.0f}"
+    svg = _svg_lanes(F, d1, [
+        {"label": CALIB["night"]["label"], "time": CALIB["night"]["time"],
+         "lanes": _lanes_from(CALIB["night"])},
+        {"label": CALIB["day"]["label"], "time": CALIB["day"]["time"],
+         "lanes": _lanes_from(CALIB["day"])},
+    ])
+    C_n, C_d = CALIB["night"], CALIB["day"]
+    foot = ("<p class='mut' style='margin:8px 0 0;line-height:1.8'>"
+            "<b style='color:#e6e8eb'>實心 = 67%</b>(單邊每 6 個交易日出界一次)· "
+            "<b style='color:#8b95a1'>淡色 = 90%</b>(每 20 日)· 豎線 = 中位 · "
+            f"黃虛線 = 錨點(今日結算 <b>{F:,.0f}</b>)。"
+            f"<br>「落空」= 該區間整段沒發生:夜盤 {C_n['whiff_hi']:.0f}%/{C_n['whiff_lo']:.0f}%,"
+            f"日盤最高 <b>{C_d['whiff_hi']:.0f}%</b> / 最低 <b>{C_d['whiff_lo']:.0f}%</b>"
+            " —— 隔夜跳空把價格帶走就不回來。"
+            "<br>哪一天會突破,事先看不出來(按 IV 分組無單調)→ 靠部位與停損寬度承受,"
+            "不要挑日子。校準 n=1,554(2020-03 起,含 2022 空頭年)。</p>")
+    red = ("<div class='panel' style='margin-top:10px;border-color:#ef5350;background:#2a1618'>"
+           "<b class='neg'>🔴 這是風險尺度,不是進場訊號</b>"
+           "<span style='font-size:15px'> — 觸及 &minus;1σ 的日子,只有 <b>5%</b> 當日收盤"
+           "回到錨點之上。帶子下緣不是買點,是「今天方向錯了」的訊號。</span></div>")
 
-    def _off(x):
-        """相對錨點的位移;四捨五入到 0 點就直接寫 A(避免出現「A−0」)。"""
-        v = x * d1
-        return "A" if abs(v) < 0.5 else (f"A+{v:,.0f}" if v > 0 else f"A&minus;{-v:,.0f}")
+    srow = "".join(
+        f"<tr><td>{w_:.1f}&sigma;</td><td style='text-align:right'><b>{w_*d1:,.0f} 點</b></td>"
+        f"<td style='text-align:right'>{w_*d1*10:,.0f}</td>"
+        f"<td style='text-align:right'>{w_*d1*50:,.0f}</td>"
+        f"<td style='text-align:right'>{lg:.1f}%</td><td style='text-align:right'>{sh:.1f}%</td></tr>"
+        for w_, lg, sh, _bk in CALIB["stop"])
+    stop = ("<div class='panel' style='margin-top:10px'><b>停損寬度 → 當日被掃機率</b>"
+            "<span class='mut' style='font-size:14px'> — 錨 = 今日結算,n=1,554 × 多空分開</span>"
+            "<table style='margin-top:6px'><tr><th>寬度</th><th>點數</th><th>微台(元)</th>"
+            "<th>小台(元)</th><th>多單被掃</th><th>空單被掃</th></tr>" + srow + "</table>"
+            "<p class='mut' style='margin:6px 0 0'>近的停損<b>空單</b>較易被掃、遠的<b>多單</b>較易"
+            "(交叉 1.5&sigma;)—— 上漲用爬的、下跌用跳的。"
+            "<br>被掃 &ne; 被洗:被掃後當日收盤回到錨點之上僅 "
+            f"{CALIB['stop'][0][3]:.0f}% / {CALIB['stop'][1][3]:.1f}% / {CALIB['stop'][2][3]:.0f}%。</p></div>")
 
-    arow = "".join(
-        f"<tr><td><b>{a['label']}</b><br><span class='mut' style='font-size:13px'>{a['when']}</span></td>"
-        f"<td style='text-align:right'>{_off(a['hi'][0])} ~ {_off(a['hi'][1])}</td>"
-        f"<td style='text-align:right'>{_off(a['lo'][0])} ~ {_off(a['lo'][1])}</td>"
-        f"<td style='text-align:right'>&plusmn;{a['cl67']*d1:,.0f}</td>"
-        f"<td style='text-align:right'><b>{a['width']:.2f}&sigma;</b></td></tr>"
-        for a in DAY_ANCHORS)
+    card = _card_html("開盤換算卡(備援版,尺 = σ)", CALIB["card_sigma"], d1,
+                      "05:05 更新後改用早報的 σ′ 版。<b>連假後只用這張</b> —— "
+                      "夜盤錨那組在連假後失準(覆蓋 37%),開盤錨不受影響(70%)")
+    status = ("<p class='mut' style='margin:8px 0 0'>⏱ 明早 <b>05:05</b> 本報表自動更新:"
+              "夜盤實況計分 + 日盤重新錨定(帶寬約 &minus;37%)。</p>")
 
     rng = ("<div class='panel'>"
            f"<div style='font-size:15px;color:#9aa3ad'>近月 ATM IV <b style='color:#e6e8eb'>{iv:.1%}</b>"
            + (f" · 歷史第 <b style='color:#e6e8eb'>{pct:.0f}</b> 百分位" if pct is not None else "")
-           + f" · 一日 1&sigma; = <b style='color:#e6e8eb'>{d1:,.0f}</b> 點"
-             f" · 錨點 = 今日日盤結算 <b style='color:#f5d90a'>{F:,.0f}</b>(黃虛線)</div>"
-           + _svg_session_bands(F, d1)
-           + "<p class='mut' style='margin:8px 0 0;line-height:1.75'>"
-             "<b style='color:#e6e8eb'>實心 = 67%</b>(每 6 個交易日破一次)· "
-             "<b style='color:#8b95a1'>淡色 = 延伸到 90% 涵蓋</b>(每 20 個交易日破一次)· "
-             "豎線 = 中位 · 黃虛線 = 錨點。"
-             "<br>破了之後還會再走:日盤<b class='neg'>向下</b>中位 "
-             f"+{SESS_BANDS[1]['over']['down'][0]*d1:,.0f} 點、P90 "
-             f"<b class='neg'>+{SESS_BANDS[1]['over']['down'][1]*d1:,.0f}</b>;"
-             f"向上 +{SESS_BANDS[1]['over']['up'][0]*d1:,.0f} / "
-             f"+{SESS_BANDS[1]['over']['up'][1]*d1:,.0f} —— <b>向下的尾巴肥一倍。</b>"
-             "<br>🔒 <b>突破哪一天會發生,事先看不出來</b>:按前一日 IV 百分位分組,日盤跌破 67% "
-             "下緣的比率是 19.6 / 12.5 / 17.2 / 14.1%(P0-50 / P50-80 / P80-90 / P90+),"
-             "全期基準 16.7%,無單調關係 &rarr; 只能靠部位與停損寬度承受,不能靠挑日子迴避。"
-             "<br>校準自 640 天實測(2023-12~2026-08,非常態假設);夜盤與日盤各自量各自的棒。"
-             "「整段落空」的比例:夜盤 "
-             f"{SESS_BANDS[0]['whiff'][0]:.1f}% / {SESS_BANDS[0]['whiff'][1]:.1f}%、日盤 "
-             f"{SESS_BANDS[1]['whiff'][0]:.1f}% / {SESS_BANDS[1]['whiff'][1]:.1f}%"
-             "(夜盤從錨點無縫接續,日盤隔著一整段夜盤才開始)。</p>"
-             "<div class='panel' style='margin-top:10px;background:#101820'>"
-             "<b>明日日盤:換一個更晚的錨點會窄很多</b>"
-             "<span class='mut' style='font-size:14px'> — 隔夜跳空佔了收盤變異的 <b>64%</b>,"
-             "而它在你進場時已經實現完畢</span>"
-             "<table style='margin-top:6px'><tr><th>錨點 A</th><th>最高點 67%</th>"
-             "<th>最低點 67%</th><th>收盤 &plusmn;67%</th><th>總寬度</th></tr>"
-           + arow
-           + f"<tr><td class='mut'>今日結算(上表)<br><span style='font-size:13px'>報表產出時就有</span></td>"
-             f"<td class='mut' style='text-align:right'>{_pt(SESS_BANDS[1]['hi'][0])} ~ {_pt(SESS_BANDS[1]['hi'][2])}</td>"
-             f"<td class='mut' style='text-align:right'>{_pt(SESS_BANDS[1]['lo'][0])} ~ {_pt(SESS_BANDS[1]['lo'][2])}</td>"
-             f"<td class='mut' style='text-align:right'>&plusmn;{SESS_BANDS[1]['cl67']*d1:,.0f}</td>"
-             f"<td class='mut' style='text-align:right'>3.04&sigma;</td></tr>"
-             "</table>"
-             "<p class='mut' style='margin:6px 0 0'>A = 你早上讀回來的那個價。"
-             "兩者都不是報表產出時算得到的,但只要看一眼盤就能套。"
-             "<br>子期穩定性:開盤錨定逐年 1.47 / 1.28 / 1.45&sigma;(幾乎不動);"
-             "今日結算錨定 2.9 / 3.1 / 3.2&sigma; 且落空率在 30–39% 之間擺盪。</p></div>"
-             "<div class='panel' style='margin-top:10px;border-color:#ef5350;background:#2a1618'>"
-             "<b class='neg'>🔴 這是風險尺度,不是進場訊號</b>"
-             "<div style='margin-top:6px;font-size:15px'>區間說的是「最低點會落在哪」,"
-             "<b>不是「跌到那裡會反彈」</b> —— 趨勢日價格直接穿過整段繼續走。<br>"
-             "實測:640 天裡有 127 天觸及 &minus;1&sigma;,其中 <b>57.5% 當日收盤仍在 &minus;1&sigma; 之下</b>。"
-             "</div></div></div>")
-
-    STOP = [(0.75, 34.4), (1.00, 24.0), (1.50, 10.9), (2.00, 4.8)]
-    srow = "".join(
-        f"<tr><td>{k:.2f}&sigma;</td><td style='text-align:right'><b>{k*d1:,.0f} 點</b></td>"
-        f"<td style='text-align:right'>{k*d1*10:,.0f}</td>"
-        f"<td style='text-align:right'>{k*d1*50:,.0f}</td>"
-        + (f"<td style='text-align:right;color:#ef5350'>{pc:.1f}%</td>" if pc > 30
-           else f"<td style='text-align:right'>{pc:.1f}%</td>")
-        + f"<td style='text-align:right' class='mut'>每 {100/pc:.1f} 日一次</td></tr>"
-        for k, pc in STOP)
-    stop = ("<div class='panel'><b>停損寬度 → 當日被掃到的機率</b>"
-            "<span class='mut' style='font-size:14px'> — 單邊最大不利偏移,640 天 &times; 多空合併"
-            "(只算日盤)</span>"
-            "<table><tr><th>寬度</th><th>點數</th><th>微台(元)</th><th>小台(元)</th>"
-            "<th>被掃機率</th><th>頻率</th></tr>" + srow + "</table></div>")
+           + f" · 一日 1&sigma; = <b style='color:#e6e8eb'>{d1:,.0f}</b> 點</div>"
+           + svg + foot + red + stop + card + status + "</div>")
     info = {"iv": iv, "pct": pct, "d1": d1, "F": F}
-    return warn + rng + stop, info
-
-
-# ── ① 區間校準表(2026-08-31 重算)────────────────────────────────────
-#: n=640(2023-12~2026-08),分母 = 前一日的定價 1σ,錨點 = 今日日盤結算。
-#: 夜盤 / 日盤**各自量各自的棒**,不混在一起 —— 兩段的形狀完全不同:
-#:   夜盤幾乎必然雙向都碰到錨點(落空 4.8% / 9.4%),因為它從錨點無縫接續;
-#:   日盤隔著一段夜盤才開始,錨點常常整段沒被碰到(落空 21.6% / 35.3%)。
-#: 值 = (P16.5, 中位, P83.5) 的 σ 倍數,已轉成「相對錨點的帶號位移」並由小到大排。
-SESS_BANDS = [
-    {"key": "night", "label": "今晚夜盤", "time": "15:00 – 05:00",
-     "hi": (+0.15, +0.44, +0.86), "lo": (-0.89, -0.37, -0.06),
-     "cl67": 0.64, "cl80": 0.81, "whiff": (4.8, 9.4), "rng": 0.88,
-     "hi80": +1.04, "hi90": +1.30, "lo80": -1.13, "lo90": -1.54,
-     "over": {"down": (0.31, 1.17, 6.93), "up": (0.23, 0.73, 1.24)}},
-    {"key": "day", "label": "明日日盤", "time": "08:45 – 13:45",
-     "hi": (-0.15, +0.57, +1.30), "lo": (-1.17, -0.30, +0.43),
-     "cl67": 0.91, "cl80": 1.22, "whiff": (21.6, 35.3), "rng": 0.87,
-     "hi80": +1.57, "hi90": +1.92, "lo80": -1.55, "lo90": -2.04,
-     "over": {"down": (0.50, 2.52, 4.75), "up": (0.36, 1.23, 3.43)}},
-]
-
-#: 🔒 **突破率不可預測**(2026-08-31 實測,n=641)。按前一日 IV 百分位分組,
-#: 日盤跌破 67% 下緣的比率是 19.6% / 12.5% / 17.2% / 14.1%(P0-50 / P50-80 /
-#: P80-90 / P90+),全期基準 16.7% —— 無單調關係、全部貼著基準。
-#: 這其實是好性質:σ 已經把 IV 體制正規化掉了,殘差與體制無關 ⇒ 帶子跨體制校準良好。
-#: 但同時也是壞消息:**你無法事先知道哪一天會突破**,所以「怎麼處理突破」
-#: 只能靠部位與停損寬度,不能靠挑日子。
-
-#: 明日日盤改用更晚的錨點會窄多少(同一組 640 天)。
-#: 隔夜跳空佔了收盤變異的 64%,而它在你進場時已經實現完畢 —— 這張表就是那件事的價碼。
-#: ⚠ 兩者都**不是**報表產出時算得到的,要早上自己看盤讀一個數字回來套。
-DAY_ANCHORS = [
-    {"label": "夜盤收盤(05:00)", "when": "早上開機就有",
-     "hi": (+0.08, +0.94), "lo": (-0.89, -0.00), "cl67": 0.63, "width": 1.74},
-    {"label": "日盤開盤(08:45)", "when": "開盤那一刻",
-     "hi": (+0.11, +0.83), "lo": (-0.79, -0.11), "cl67": 0.56, "width": 1.40},
-]
-
-
-def _svg_session_bands(F, d1, w=880):
-    """今晚夜盤 + 明日日盤,共用一條價格 X 軸,每段三條泳道(最高/收盤/最低)。
-
-    為什麼是泳道不是疊圖:三個量的區間會互相重疊(日盤的最低點區間上緣 +0.43σ
-    比最高點區間下緣 −0.15σ 還高),疊在同一條線上讀不出來哪個是哪個。
-    """
-    # (row_i, 名稱, 顏色, 67%下, 中位, 67%上, 90%尾巴的外緣 or None)
-    lanes = []
-    for i, s in enumerate(SESS_BANDS):
-        lanes.append((i, "最高點", "#ef5350", s["hi"][0], s["hi"][1], s["hi"][2], s["hi90"]))
-        lanes.append((i, "收盤", "#7f8ea3", -s["cl67"], 0.0, s["cl67"], None))
-        lanes.append((i, "最低點", "#26a69a", s["lo"][0], s["lo"][1], s["lo"][2], s["lo90"]))
-    lo = min(min(l[3], l[6] if l[6] is not None else l[3]) for l in lanes) * d1 + F
-    hi = max(max(l[5], l[6] if l[6] is not None else l[5]) for l in lanes) * d1 + F
-    pad = (hi - lo) * 0.08
-    lo, hi = lo - pad, hi + pad
-    L, R = 76, w - 16
-    X = lambda v: L + (v - lo) / (hi - lo) * (R - L)
-    LANE_H, LANE_G, HEAD = 22, 5, 26
-    sec_h = HEAD + 3 * (LANE_H + LANE_G)
-    h = 30 + sec_h * len(SESS_BANDS) + 6
-    P = [f'<rect x="0" y="0" width="{w}" height="{h}" fill="#0b0e13"/>']
-    step = 10 ** math.floor(math.log10((hi - lo) / 4))
-    for m in (1, 2, 5, 10):
-        if (hi - lo) / (step * m) <= 7:
-            step *= m
-            break
-    tk = math.ceil(lo / step) * step
-    while tk <= hi:
-        P.append(f'<line x1="{X(tk):.0f}" y1="20" x2="{X(tk):.0f}" y2="{h-4}" stroke="#171d25"/>'
-                 f'<text x="{X(tk):.0f}" y="14" fill="#5a6470" font-size="12" '
-                 f'text-anchor="middle">{tk:,.0f}</text>')
-        tk += step
-    # 錨點(今日日盤結算)
-    P.append(f'<line x1="{X(F):.0f}" y1="20" x2="{X(F):.0f}" y2="{h-4}" '
-             f'stroke="#f5d90a" stroke-width="2" stroke-dasharray="4 3"/>')
-    for i, s in enumerate(SESS_BANDS):
-        y0 = 30 + sec_h * i
-        P.append(f'<text x="8" y="{y0+16}" fill="#e6e8eb" font-size="15" font-weight="bold">'
-                 f'{s["label"]}</text>'
-                 f'<text x="{8 + 68}" y="{y0+16}" fill="#5a6470" font-size="12">{s["time"]}</text>')
-        for k, (ri, name, col, a, mid, b, tail) in enumerate([l for l in lanes if l[0] == i]):
-            y = y0 + HEAD + k * (LANE_H + LANE_G)
-            xa, xb, xm = X(F + a * d1), X(F + b * d1), X(F + mid * d1)
-            P.append(f'<text x="{L-8}" y="{y+15}" fill="#9aa3ad" font-size="13" '
-                     f'text-anchor="end">{name}</text>')
-            if tail is not None:            # 67% → 90% 涵蓋的尾巴(淡)
-                xt = X(F + tail * d1)
-                t0, t1 = (xb, xt) if tail > b else (xt, xa)
-                P.append(f'<rect x="{t0:.0f}" y="{y+5}" width="{max(t1-t0,1):.0f}" '
-                         f'height="{LANE_H-10}" fill="{col}" opacity="0.11" rx="2"/>')
-            P.append(f'<rect x="{xa:.0f}" y="{y}" width="{max(xb-xa,2):.0f}" height="{LANE_H}" '
-                     f'fill="{col}" opacity="0.28" rx="3"/>')
-            P.append(f'<line x1="{xm:.0f}" y1="{y}" x2="{xm:.0f}" y2="{y+LANE_H}" '
-                     f'stroke="{col}" stroke-width="2"/>')
-            P.append(f'<text x="{xa-5:.0f}" y="{y+16}" fill="#8b95a1" font-size="12" '
-                     f'text-anchor="end">{F+a*d1:,.0f}</text>'
-                     f'<text x="{xb+5:.0f}" y="{y+16}" fill="#8b95a1" font-size="12">'
-                     f'{F+b*d1:,.0f}</text>')
-            if tail is not None:            # 尾巴外緣 = 停損真正該讀的那個數,一定要標
-                xt = X(F + tail * d1)
-                if tail > b:
-                    P.append(f'<text x="{xt+5:.0f}" y="{y+16}" fill="#5f6a77" '
-                             f'font-size="12">{F+tail*d1:,.0f}</text>')
-                else:
-                    P.append(f'<text x="{xt-5:.0f}" y="{y+16}" fill="#5f6a77" font-size="12" '
-                             f'text-anchor="end">{F+tail*d1:,.0f}</text>')
-    return (f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
-            f'style="width:100%;height:auto">{"".join(P)}</svg>')
+    return warn + rng, info
 
 
 def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
-    """結算價區間的視覺化:最近三個到期各一列,共用同一條 X 軸(可直接互相比較)。
+    """結算價區間:最近三個到期各一列,同一條 X 軸。實心 = 67%、淡 = 90%(分天期校準)。
     ⚠ X 軸是**現貨指數**點位(結算以現貨計算),不是 TXF。"""
     if not settles:
         return "<p class='mut'>(無可用到期)</p>"
-    lo = min(s["b10"][0] for s in settles)
-    hi = max(s["b10"][1] for s in settles)
+    lo = min(s["q90"][0] for s in settles)
+    hi = max(s["q90"][1] for s in settles)
     pad = (hi - lo) * 0.10 or 100
     lo, hi = lo - pad, hi + pad
     h = 46 + row_h * len(settles)
     X = lambda v: 20 + (v - lo) / (hi - lo) * (w - 40)
     P = [f'<rect x="0" y="0" width="{w}" height="{h}" fill="#0b0e13"/>']
-    # 頂部刻度
     step = 10 ** math.floor(math.log10((hi - lo) / 4))
     for m in (1, 2, 5, 10):
         if (hi - lo) / (step * m) <= 6:
@@ -1228,21 +1221,25 @@ def _svg_settle_bands(settles, fut_now, w=880, row_h=76):
         tk += step
     for i, s in enumerate(settles):
         y = 34 + row_h * i
-        a10, b10, h10 = s["b10"]
-        a08, b08, h08 = s["b08"]
-        P.append(f'<rect x="{X(a10):.0f}" y="{y+16:.0f}" width="{X(b10)-X(a10):.0f}" height="26" '
-                 f'fill="#26a69a" opacity="0.16" rx="3"/>')
-        P.append(f'<rect x="{X(a08):.0f}" y="{y+16:.0f}" width="{X(b08)-X(a08):.0f}" height="26" '
+        a67, b67 = s["q67"]
+        a90, b90 = s["q90"]
+        P.append(f'<rect x="{X(a90):.0f}" y="{y+16:.0f}" width="{X(b90)-X(a90):.0f}" height="26" '
+                 f'fill="#26a69a" opacity="0.13" rx="3"/>')
+        P.append(f'<rect x="{X(a67):.0f}" y="{y+16:.0f}" width="{X(b67)-X(a67):.0f}" height="26" '
                  f'fill="#26a69a" opacity="0.34" rx="3"/>')
         P.append(f'<line x1="{X(s["fwd"]):.0f}" y1="{y+12:.0f}" x2="{X(s["fwd"]):.0f}" '
                  f'y2="{y+46:.0f}" stroke="#f5d90a" stroke-width="2"/>')
         P.append(f'<text x="20" y="{y+10:.0f}" fill="#e6e8eb" font-size="15">'
                  f'<tspan font-weight="bold">{s["date"][5:]}(週{s["wd"]})</tspan>'
                  f'<tspan fill="#9aa3ad" font-size="13"> {s["code"]} · 剩 {s["Td"]:.0f} 日'
-                 f' · IV {s["iv"]:.1%} · OI {s["oi"]:,}</tspan></text>')
-        P.append(f'<text x="{X(a10):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13">{a10:,.0f}</text>'
-                 f'<text x="{X(b10):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13" '
-                 f'text-anchor="end">{b10:,.0f}</text>'
+                 f' · IV {s["iv"]:.1%} · OI {s["oi"]:,} · 67%=&plusmn;{s["m67"]:.2f}&sigma; '
+                 f'90%=&plusmn;{s["m90"]:.2f}&sigma;</tspan></text>')
+        P.append(f'<text x="{X(a67):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13">{a67:,.0f}</text>'
+                 f'<text x="{X(b67):.0f}" y="{y+57:.0f}" fill="#9aa3ad" font-size="13" '
+                 f'text-anchor="end">{b67:,.0f}</text>'
+                 f'<text x="{X(a90):.0f}" y="{y+12:.0f}" fill="#5f6a77" font-size="12">{a90:,.0f}</text>'
+                 f'<text x="{X(b90):.0f}" y="{y+12:.0f}" fill="#5f6a77" font-size="12" '
+                 f'text-anchor="end">{b90:,.0f}</text>'
                  f'<text x="{X(s["fwd"]):.0f}" y="{y+57:.0f}" fill="#f5d90a" font-size="13" '
                  f'text-anchor="middle">{s["fwd"]:,.0f}</text>')
     return f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg">{"".join(P)}</svg>'
@@ -1430,39 +1427,25 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
                      else "偏高,留意停損寬度" if (_pc is not None and _pc >= 75)
                      else "常態區間"))
         _F = _si["F"]
-        d1_v = f"{_F-0.92*_d1:,.0f} – {_F+0.92*_d1:,.0f}"
-        d1_sub = (f"&plusmn;{0.92*_d1:,.0f} 點 · 微台一口日風險 {_d1*10:,.0f} 元"
-                  f"<br>最高點 {_F-0.15*_d1:,.0f}–{_F+1.30*_d1:,.0f} · "
-                  f"最低點 {_F-1.16*_d1:,.0f}–{_F+0.43*_d1:,.0f}")
+        _cd = CALIB["day"]
+        d1_v = f"{_F-_cd['cl67']*_d1:,.0f} – {_F+_cd['cl67']*_d1:,.0f}"
+        d1_sub = (f"&plusmn;{_cd['cl67']*_d1:,.0f} 點 · 微台一口日風險 {_d1*10:,.0f} 元"
+                  f"<br>最高點 {_F+_cd['hi'][0]*_d1:,.0f}–{_F+_cd['hi'][2]*_d1:,.0f} · "
+                  f"最低點 {_F+_cd['lo'][3]*_d1:,.0f}–{_F+_cd['lo'][2]*_d1:,.0f}")
     else:
         iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
     if _rmed is not None:
         rm_v = f"{_rmed:.2f}"
-        rm_cls = "pos" if _rmed < 0.7 else ("neg" if _rmed > 1.0 else "mut")
-        rm_sub = ("近 10 日「實際 &divide; 定價 1&sigma;」中位(理論 0.67)<br>"
-                  + ("定價<b>偏寬</b> → 賣方相對有利" if _rmed < 0.7
-                     else "定價<b>偏窄</b> → 買方相對有利" if _rmed > 1.0
-                     else "定價與實際相符"))
+        rm_cls = "mut"
+        rm_sub = (f"近 10 日「實際 &divide; 定價 1&sigma;」中位(長期 {CALIB['recent_med']:.2f})<br>"
+                  + ("近期實際<b>小於</b>定價" if _rmed < CALIB['recent_med']
+                     else "近期實際<b>大於</b>定價" if _rmed > 1.0 else "與定價大致相符")
+                  + " · 回顧,非明天的預報")
     else:
         rm_v, rm_cls, rm_sub = "N/A", "mut", "資料不足"
 
     _sts = gex.get("settles") or []
     settle_svg = _svg_settle_bands(_sts, meta.get("fut_front", 0))
-    settle_html = ""
-    if _sts:
-        settle_html = "<div class='panel'><table><tr><th>結算日</th><th>剩餘</th>"             "<th>中心(遠期價)</th><th>±0.8&sigma;(命中約 67%)</th><th>±1.0&sigma;(命中約 82%)</th></tr>"
-        for s_ in _sts:
-            far = " <span class='mut'>(此天期未校準)</span>" if s_["cal_far"] else ""
-            settle_html += (
-                f"<tr><td><b>{s_['date']}(週{s_['wd']})</b><br>"
-                f"<span class='mut'>{s_['code']}</span></td>"
-                f"<td style='text-align:right'>{s_['Td']:.0f} 日</td>"
-                f"<td style='text-align:right'><b>{s_['fwd']:,.0f}</b></td>"
-                f"<td style='text-align:right'>{s_['b08'][0]:,.0f} – {s_['b08'][1]:,.0f}"
-                f"<br><span class='mut'>&plusmn;{(s_['b08'][1]-s_['b08'][0])/2:,.0f} 點</span></td>"
-                f"<td style='text-align:right'>{s_['b10'][0]:,.0f} – {s_['b10'][1]:,.0f}"
-                f"<br><span class='mut'>&plusmn;{(s_['b10'][1]-s_['b10'][0])/2:,.0f} 點{far}</span></td></tr>")
-        settle_html += "</table></div>"
 
     # ── 期限結構表 ───────────────────────────────────────────────────
     _tr = gex.get("term") or []
@@ -1516,7 +1499,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
         vex_deep_v, vex_deep_sub = "N/A", ""
     signlog_svg, signlog_note = _svg_signlog(d)
     html = f"""<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8">
-<title>TXO GEX {d}</title><style>
+<title>TXO {d}</title><style>
 body{{margin:0;background:#0e1116;color:#e6e8eb;font-family:"Microsoft JhengHei","Noto Sans TC",sans-serif;line-height:1.8;font-size:17px}}
 .wrap{{max-width:1060px;margin:0 auto;padding:24px 18px 60px}} h1{{font-size:27px;margin:0}}
 h2{{font-size:21px;margin:28px 0 10px;border-left:4px solid #f5d90a;padding-left:10px}}
@@ -1539,15 +1522,8 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
 .cell .sub{{font-size:13px;color:#9aa3ad;text-align:center;margin:0 0 6px}}
 .cell svg{{border:0;background:transparent}}
 </style></head><body><div class="wrap">
-<h1>TXO 做市商曝險地圖 <span class="mut">{d}(收盤)</span></h1>
-<p class="mut">產生 {datetime.now().strftime('%Y-%m-%d %H:%M')} | 序列 {meta['n_series']} 條 | 到期:{exp_str} |
-IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call parity {meta.get('n_expiry_parity','?')} 個到期
-(其餘退回期貨結算價曲線)| GEX+ β={gex['beta']:.1f}</p>
-<div class="panel" style="border-color:#3a4553">
-<span class="{play_cls}" style="font-size:22px"><b>今日盤性:{play_t}</b></span>
-<span class="mut" style="font-size:14px"> — 美股慣例假設(dealer long call / short put)下的讀法</span>
-<div style="margin-top:6px;font-size:17px">{play_b}</div>
-</div>
+<h1>TXF/TXO 風險區間日報 <span class="mut">{d}(收盤)</span></h1>
+<p class="mut">產生 {datetime.now().strftime('%Y-%m-%d %H:%M')} · 到期:{exp_str} · 序列 {meta['n_series']} 條</p>
 <div class="cards">
 <div class="card"><div class="n">TXF 近月(結算價)</div><div class="v">{meta.get('fut_front',0):,.0f}</div>
 <div class="n">TAIEX 現貨 {S:,.0f}(基差 {basis:+.0f})</div></div>
@@ -1561,34 +1537,29 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <div class="card"><div class="n">近期定價準不準</div><div class="v {rm_cls}">{rm_v}</div>
 <div class="n">{rm_sub}</div></div>
 </div>
-<div class="panel" style="border-color:#3a4553">
-<b style="font-size:18px">怎麼看(三步,依可靠度排序)</b>
-<div style="margin-top:8px;font-size:16px;line-height:1.9">
-<b>1. 明天的區間</b> &rarr; 決定<b>部位大小</b>與<b>停損寬度</b>。IV 在 P90 以上就縮手,不要猜方向。
-<span class="neg">這是風險尺度,<b>不是進場訊號</b> —— 區間下緣不等於買點。</span><br>
-<b>2. 結算日區間</b> &rarr; 週三/週五結算的落點;要賣選擇權就賣在區間外。<br>
-<b>3. 結構觀察</b> &rarr; <span class="mut">只當背景。符號約 3/4 的日子是錯的、牆在價格空間不存在,
-別拿它決定進出場。</span>
-</div></div>
-<h2>① 明天的區間 <span class="mut">— 部位規模 / 停損寬度</span></h2>
+<!-- MORNING-SLOT -->
+<h2>① 今晚與明天 <span class="mut">— 高/低/收區間 · 停損 · 開盤換算卡</span></h2>
 
 {scale_html}
 
-<h3>近 10 日:實際波動 vs 當時的定價</h3>
-<p class="mut">這是報表<b>唯一會檢查自己準不準</b>的區塊。「實際/1&sigma;」持續 &lt;1 代表市場定價偏寬、
-&gt;1 代表偏窄 —— 比任何靜態統計都即時,因為它用的就是每天當下的定價。</p>
+<h3>近 10 日:實際波動 vs 當時的定價 <span class="mut">— 報表的自我檢查</span></h3>
 {recent_html}
 
 <h2>② 結算日的區間 <span class="mut">(最近三個到期)</span></h2>
-<p class="mut">深色帶 = <b>±0.8&sigma;,約 67% 的結算落在裡面</b>;淺色帶 = ±1.0&sigma;,約 82%。
-黃線 = 中心(選擇權推算的遠期價)。<br>
-校準自 2024-01~2026-08 共 173 個「剩 1 日」的週選實測(剩 3 日 79%、剩 5 日 75%)。
-⚠️ 這是<b>現貨指數</b>點位(結算以現貨計算),不是 TXF 點位。
-⚠️ <b>別用固定點數</b>:同一個「±200 點」2025 上半年命中 76.8%、2025-07 後掉到 42.3%,因為波動水位會變。</p>
+<p class="mut">實心 = <b>67%</b>、淡色 = <b>90%</b>(倍數按剩餘天數校準,n=2,001)· 黃線 = 遠期價。
+⚠️ <b>現貨指數</b>點位(結算以現貨計),不是 TXF;賣選擇權賣在區間外。</p>
 {settle_svg}
-{settle_html}
 
-<h2>③ 結構觀察 <span class="mut">— 以下皆為參考,不是決策輸入</span></h2>
+<details style="margin:28px 0 10px"><summary style="cursor:pointer;font-size:20px">
+<b>③ 結構觀察</b> <span class="mut">— 背景,非決策輸入(GEX 地圖 · 符號日誌 · 法人;
+符號約 3/4 的日子是錯的、牆不存在)</span></summary>
+<div class="panel" style="border-color:#3a4553">
+<span class="{play_cls}" style="font-size:22px"><b>今日盤性:{play_t}</b></span>
+<span class="mut" style="font-size:14px"> — 美股慣例假設(dealer long call / short put)下的讀法</span>
+<div style="margin-top:6px;font-size:17px">{play_b}</div>
+</div>
+<p class="mut">IV 反推失敗補中位:{meta['n_iv_fallback']} 條 · 遠期價:put-call parity
+{meta.get('n_expiry_parity','?')} 個到期(其餘退回期貨結算價曲線)· GEX+ β={gex['beta']:.1f}</p>
 <div class="cards">
 <div class="card"><div class="n">Gamma Flip</div><div class="v warn">{f'{flip:,.0f}' if flip else 'N/A'}</div>
 <div class="n">現價 {dist_txt} · {dist_sub}</div></div>
@@ -1631,6 +1602,7 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
 <p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)<br>{signlog_note}</p>
 {signlog_svg}
 {inst_html}
+</details>
 <p class="mut" style="margin-top:20px">最近到期 {expiries[0]['code'] if expiries else '?'} ·
 距結算 {f"{expiries[0]['days']:.0f}" if expiries else '?'} 天(結算後地圖重繪)</p>
 </div></body></html>"""
@@ -1645,6 +1617,41 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
     if d.strftime("%Y%m%d") >= newest:
         (rpt_dir / "latest.html").write_text(html, encoding="utf-8")
     return out
+
+
+def write_forecast(d, S, meta, gex):
+    """凍結 14:25 的預測 → forecast/fc_YYYYMMDD.json。
+
+    早報(txo_morning.py)**只讀不重算** —— 「昨天預測了什麼」不受日後改碼影響,
+    計分板才有意義。⚠ `--backfill --report-only` 會以**當下的碼**重寫歷史 fc
+    (係數更新後數字會變)—— 這是刻意的:fc 是重放素材;早報實際用過的 fc
+    會原樣快照進 logs/morning_history.jsonl,那份才是不可變稽核。
+    """
+    iv = gex.get("front_iv")
+    F = meta.get("fut_front") or 0
+    if not (iv and iv > 0 and F):
+        return None
+    d1 = iv * math.sqrt(1 / 252.0) * F
+    bands = {}
+    for key in ("night", "day"):
+        c = CALIB[key]
+        bands[key] = {
+            "hi": [round(F + x * d1, 1) for x in c["hi"]],     # (90外緣在 hi[3])
+            "lo": [round(F + x * d1, 1) for x in c["lo"]],     # (90外緣在 lo[0])
+            "cl67": [round(F - c["cl67"] * d1, 1), round(F + c["cl67"] * d1, 1)],
+            "cl90": [round(F - c["cl90"] * d1, 1), round(F + c["cl90"] * d1, 1)],
+        }
+    fc = {"date": d.isoformat(),
+          "built": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+          "F": round(F, 1), "spot": round(S, 1),
+          "basis": round(meta.get("basis", 0.0), 1),
+          "iv": round(iv, 6), "sigma": round(d1, 2),
+          "calib_built": "2026-08-31", "bands": bands}
+    fdir = TXO_ROOT / "forecast"
+    fdir.mkdir(parents=True, exist_ok=True)
+    fp = fdir / f"fc_{d.strftime('%Y%m%d')}.json"
+    fp.write_text(json.dumps(fc, ensure_ascii=False, indent=1), encoding="utf-8")
+    return fp
 
 
 def log_event(rec):
@@ -1879,6 +1886,7 @@ def run_one(d, force=False, report_only=False):
     expiries = sorted({(s["exp_code"], s["Td"]) for s in series}, key=lambda x: x[1])
     expiries = [{"code": c, "days": t} for c, t in expiries]
     rpt = render_html(d, S, meta, gex, inst, expiries, pct)
+    write_forecast(d, S, meta, gex)          # 凍結今日預測(早報素材)
     print(f"[OK] {d} spot={S:,.0f}(基差{meta['basis']:+.0f}) flip={gex['flip_us']} "
           f"totGEX_us={gex['tot_us']:+.1f}(P{pct.get('us','-')}) "
           f"totGEX_tw={gex['tot_tw']:+.1f} inst={'Y' if inst else 'N'} "
@@ -1922,6 +1930,11 @@ def prune_reports(keep_days=30):
     if gone:
         print(f"[PRUNE] 保留 {keep_days} 天(>= {cut}),刪除 {len(gone)} 份:"
               f"{gone[0].stem[4:]}~{gone[-1].stem[4:]}")
+    fdir = TXO_ROOT / "forecast"
+    if fdir.exists():
+        for f in fdir.glob("fc_*.json"):
+            if f.stem[3:] < cut:
+                f.unlink()
 
 
 def main():
