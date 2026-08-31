@@ -1466,7 +1466,12 @@ IV 反推失敗補中位:{meta['n_iv_fallback']} 條 | 遠期價來源:put-call 
     rpt_dir.mkdir(parents=True, exist_ok=True)
     out = rpt_dir / f"gex_{d.strftime('%Y%m%d')}.html"
     out.write_text(html, encoding="utf-8")
-    (rpt_dir / "latest.html").write_text(html, encoding="utf-8")
+    # latest.html 只能被「不早於現有最新一份」的報表覆蓋。
+    # 回填舊日期時不得讓它倒退 —— 同一個坑已經踩第三次(2026-08-31:
+    # 回填 07-21~08-20 把 latest 打回 8/20,而 8/21~8/31 的報表都在)。
+    newest = max((f.stem[4:] for f in rpt_dir.glob("gex_*.html")), default="")
+    if d.strftime("%Y%m%d") >= newest:
+        (rpt_dir / "latest.html").write_text(html, encoding="utf-8")
     return out
 
 
