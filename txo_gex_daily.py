@@ -952,7 +952,7 @@ def _recent_table(d, n=10):
     tone = ("近期實際波動<b>小於</b>市場所定的價" if med < CALIB["recent_med"]
             else "近期實際波動<b>大於</b>市場所定的價" if med > 1.0
             else "近期實際波動與定價大致相符")
-    html = ("<table><tr><th>日期</th><th>TXF 收</th><th>變動</th><th>%</th>"
+    html = ("<table><tr><th>日期</th><th>TXF 結算</th><th>變動</th><th>%</th>"
             "<th>近月 IV</th><th>百分位</th><th>當日定價 1&sigma;</th><th>實際/1&sigma;</th></tr>"
             + rows + "</table>"
             + f"<p class='mut' style='margin:6px 0 0'>近 {len(zs)} 日「實際/1&sigma;」中位 "
@@ -1173,10 +1173,12 @@ def _history_scale_for(target):
         return None, None
 
 
-def _day_review(d):
-    """⓪ 今日日盤回顧:今早 08:46 開盤定稿的帶 vs 今天實際 OHLC(計分)。
+def _day_review(d, settle=None):
+    """⓪ 今日日盤回顧:今早 08:46 開盤定稿的帶 vs 今天實際(計分)。
 
-    14:25 時湖已有今日日盤(13:50 sync);湖沒有 → 一行說明,不擋 ①。"""
+    「收」用**官方結算價**(settle = meta['fut_front'],2026-09-01 使用者指定:
+    收盤價沒意義)—— 與最後成交差中位 ~12 點(≈0.02σ,對帶的校準無感,
+    但那才是損益結算的價)。高/低仍是盤中實際極值(湖);湖沒有今日 → 一行說明,不擋 ①。"""
     try:
         fs = kbar_paths("1d", "TXF", d, d)
         k = (pl.read_parquet(fs).with_columns(pl.col("date").cast(pl.Utf8))
@@ -1187,6 +1189,7 @@ def _day_review(d):
         return ("<h2>⓪ 今日日盤回顧</h2><p class='mut'>湖中尚無今日日盤資料"
                 "(13:50 sync 未完成?)—— 略過回顧,不影響下方預測。</p>")
     O, H, L, C = (float(k[c][0]) for c in ("open", "high", "low", "close"))
+    S_ = float(settle) if settle else C          # 官方結算;拿不到才退最後成交
     sp, key = _history_scale_for(d)
     if sp is None:
         return ""                                     # 樣本最早幾天沒有前一份 fc,靜默略過
@@ -1198,16 +1201,16 @@ def _day_review(d):
              ("最低點", "#26a69a", lo[3], lo[1], lo[2], lo[0], None)]
     svg = _svg_lanes(O, sp, [{"label": "今日日盤", "time": f"錨 = 開盤 {O:,.0f}",
                               "lanes": lanes,
-                              "marks": [(0, H), (1, C), (2, L)]}])
+                              "marks": [(0, H), (1, S_), (2, L)]}])
     hits = [O + hi[0] * sp <= H <= O + hi[2] * sp,
-            O - spec["cl67"] * sp <= C <= O + spec["cl67"] * sp,
+            O - spec["cl67"] * sp <= S_ <= O + spec["cl67"] * sp,
             O + lo[3] * sp <= L <= O + lo[2] * sp]
     sc = ["✅" if h else "❌" for h in hits]
     return (
         "<h2>⓪ 今日日盤回顧 <span class='mut'>— 今早開盤定稿的預測 vs 實際</span></h2>"
         "<div class='panel'>"
         f"<div style='font-size:16px'>O <b>{O:,.0f}</b> · "
-        f"高 {H:,.0f} {sc[0]} · 收 {C:,.0f} {sc[1]} · 低 {L:,.0f} {sc[2]}"
+        f"高 {H:,.0f} {sc[0]} · 結算 <b>{S_:,.0f}</b> {sc[1]} · 低 {L:,.0f} {sc[2]}"
         f"<span class='mut'> · 尺 = {'σ′' if key == 'card_sprime' else 'σ(無早報,備援)'}"
         f" {sp:,.0f} 點(與 08:46 同一組)· ✅ = 落在 67% 帶內</span></div>"
         + svg + _lane_legend(actual=True) + "</div>")
@@ -1513,7 +1516,7 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
 
     # ── 結算區間 ─────────────────────────────────────────────────────
     warn_html, rng_html, _si = _scale_panel(gex, meta)
-    review_html = _day_review(d)             # ⓪ 今日回顧(2026-09-01 使用者拍板,預設展開)
+    review_html = _day_review(d, meta.get("fut_front"))   # ⓪ 今日回顧;收=官方結算
     recent_html, _rmed = _recent_table(d)
     # ── 三張決策卡的值 ────────────────────────────────────────────
     if _si:
