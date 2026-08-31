@@ -938,7 +938,7 @@ def _recent_table(d, n=10):
                  f"<td style='text-align:right'>{b['fut_front']:,.0f}</td>"
                  f"<td style='text-align:right'>{ch:+,.0f}</td>"
                  f"<td style='text-align:right'>{ch/a['fut_front']*100:+.2f}%</td>"
-                 f"<td style='text-align:right'{hot}>{iv:.1%}</td>"
+                 f"<td style='text-align:right'{hot}>{(f'{iv:.1%}' if iv is not None else '—')}</td>"
                  f"<td style='text-align:right'{hot}>{('P%.0f' % pc) if pc is not None else '—'}</td>"
                  f"<td style='text-align:right'>{a['day_move_pts']:,.0f}</td>"
                  f"<td style='text-align:right'{big}>{z:.2f}&sigma;</td></tr>")
@@ -949,14 +949,14 @@ def _recent_table(d, n=10):
     # ⚠️ 這一欄是**回頭看**的,不是明天的預報。波動有聚集性 —— 安靜之後正是容易
     #    出事的時候。舊版寫「偏寬 → 賣方相對有利」是把回顧當成前瞻,方向會誤導:
     #    2026-08-28 那份的比值 0.39(全月最低),隔一個交易日盤中就走了 1.62σ。
-    tone = ("近期實際波動<b>小於</b>市場所定的價" if med < 0.63
+    tone = ("近期實際波動<b>小於</b>市場所定的價" if med < CALIB["recent_med"]
             else "近期實際波動<b>大於</b>市場所定的價" if med > 1.0
             else "近期實際波動與定價大致相符")
     html = ("<table><tr><th>日期</th><th>TXF 收</th><th>變動</th><th>%</th>"
             "<th>近月 IV</th><th>百分位</th><th>當日定價 1&sigma;</th><th>實際/1&sigma;</th></tr>"
             + rows + "</table>"
             + f"<p class='mut' style='margin:6px 0 0'>近 {len(zs)} 日「實際/1&sigma;」中位 "
-              f"<b>{med:.2f}</b>(長期中位 0.63)&rarr; {tone}。"
+              f"<b>{med:.2f}</b>(長期中位 {CALIB['recent_med']:.2f})&rarr; {tone}。"
               "<br>⚠️ <b>這是回顧,不是明天的預報。</b>波動有聚集性,比值低只代表最近安靜,"
               "不代表明天安全 —— 8/28 那份的比值 0.39(全月最低),隔一個交易日盤中就走了 1.62&sigma;。"
               "<br>紅字 = IV 在歷史 P90 以上;黃字 = 當日變動 &ge; 2&sigma;。</p>")
@@ -1538,6 +1538,7 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
 <div class="card"><div class="n">近期定價準不準</div><div class="v {rm_cls}">{rm_v}</div>
 <div class="n">{rm_sub}</div></div>
 </div>
+<!-- OPEN-SLOT -->
 <!-- MORNING-SLOT -->
 <h2>① 今晚與明天 <span class="mut">— 高/低/收區間 · 停損 · 開盤換算卡</span></h2>
 
@@ -1598,7 +1599,7 @@ tr:last-child td{{border-bottom:0}} tbody tr:hover{{background:#161b22}}
 
 <h3>OI 集中價位</h3>
 <div class="panel">最集中三檔(以 |GEX| 佔全場比重,<span class="mut">不依賴符號</span>):{conc_html}
-<br><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div></p>
+<br><span class="pos">正 GEX 集中:</span>{pos}<br><span class="neg">負 GEX 集中:</span>{neg}</div>
 <h3>符號日誌(自營商淨部位走勢)</h3>
 <p class="mut">期交所公布的實際持倉(自營商為做市商最接近的代理)<br>{signlog_note}</p>
 {signlog_svg}
@@ -1751,7 +1752,10 @@ def write_gex_state(d, ok, attempts, mode="wait"):
     except Exception:
         st = {}
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    trading = _lake_has_trading_day(d)
+    try:
+        trading = _lake_has_trading_day(d)
+    except Exception:
+        trading = None                     # 探針壞了 → fail-closed 分支(累加+標註)
     st.update({"last_run": now, "last_date": str(d), "last_ok": bool(ok),
                "last_attempts": attempts, "last_mode": mode,
                "lake_has_trading_day": trading, "note": ""})
@@ -1766,8 +1770,12 @@ def write_gex_state(d, ok, attempts, mode="wait"):
         if (mst.get("consecutive_failures") or 0) >= 2:
             print(f"[WARN] 早報連續失敗 {mst['consecutive_failures']} 次"
                   f"(最後 {mst.get('last_run')}:{mst.get('note','')})—— 查 txo_morning")
+        if (mst.get("open_failures") or 0) >= 2:
+            print(f"[WARN] 開盤定稿連續失敗 {mst['open_failures']} 次 —— 查 txo_morning --mode open")
     except Exception:
-        pass
+        # 讀不到 ≠ 健康:st 是從舊 state.json 載入的,舊 morning 鍵會原樣留著 ——
+        # 必須覆蓋成退化標記,否則 daily_sync 快照會把「壞檔」看成「上次的健康值」。
+        st["morning"] = {"last_ok": None, "stale": True, "note": "morning_state_unreadable"}
     if ok:
         st["last_ok_date"] = str(d)
         st["last_ok_ts"] = now
@@ -1948,6 +1956,11 @@ def prune_reports(keep_days=30):
     if fdir.exists():
         for f in fdir.glob("fc_*.json"):
             if f.stem[3:] < cut:
+                f.unlink()
+    cut_dash = f"{cut[:4]}-{cut[4:6]}-{cut[6:]}"      # log 檔名用 YYYY-MM-DD
+    for pat in ("run-*.log", "morning-*.log"):
+        for f in (TXO_ROOT / "logs").glob(pat):
+            if f.stem.split("-", 1)[1] < cut_dash:
                 f.unlink()
 
 
