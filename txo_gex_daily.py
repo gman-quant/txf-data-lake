@@ -1073,27 +1073,48 @@ def _svg_lanes(anchor, scale, sections, w=880):
                          f'height="{LANE_H-10}" fill="{col}" opacity="0.11" rx="2"/>')
                 anch = "" if right else ' text-anchor="end"'
                 dx = 5 if right else -5
-                P.append(f'<text x="{xt+dx:.0f}" y="{y+16}" fill="#5f6a77" font-size="12"{anch}>'
+                P.append(f'<text x="{xt+dx:.0f}" y="{y+16}" fill="#95a0ac" font-size="12"{anch}>'
                          f'{anchor+tail*scale:,.0f}</text>')
+            tt = (f"{name} 67%:{anchor+a*scale:,.0f} – {anchor+b*scale:,.0f}"
+                  f" · 中位 {anchor+med*scale:,.0f}")
+            for tail in (tl, th):
+                if tail is not None:
+                    tt += f" · 90% 外緣 {anchor+tail*scale:,.0f}"
             P.append(f'<rect x="{xa:.0f}" y="{y}" width="{max(xb-xa,2):.0f}" height="{LANE_H}" '
-                     f'fill="{col}" opacity="0.28" rx="3"/>')
+                     f'fill="{col}" opacity="0.28" rx="3"><title>{tt}</title></rect>')
             P.append(f'<line x1="{xm:.0f}" y1="{y}" x2="{xm:.0f}" y2="{y+LANE_H}" '
                      f'stroke="{col}" stroke-width="2"/>')
             # 67% 緣的數字:朝帶內收,避免與尾巴外緣標籤打架
-            P.append(f'<text x="{xa+4:.0f}" y="{y+16}" fill="#c7ccd3" font-size="12">'
-                     f'{anchor+a*scale:,.0f}</text>'
-                     f'<text x="{xb-4:.0f}" y="{y+16}" fill="#c7ccd3" font-size="12" '
-                     f'text-anchor="end">{anchor+b*scale:,.0f}</text>')
+            P.append(f'<text x="{xa+4:.0f}" y="{y+16}" fill="#f0f2f5" font-size="13" '
+                     f'font-weight="bold">{anchor+a*scale:,.0f}</text>'
+                     f'<text x="{xb-4:.0f}" y="{y+16}" fill="#f0f2f5" font-size="13" '
+                     f'font-weight="bold" text-anchor="end">{anchor+b*scale:,.0f}</text>')
         for (li, pr) in sec.get("marks", ()):
             y = y0 + HEAD + li * (LANE_H + LANE_G) + LANE_H // 2
             xp = X(pr)
+            lname = sec["lanes"][li][0]
             P.append(f'<path d="M {xp:.0f} {y-7} L {xp+6:.0f} {y} L {xp:.0f} {y+7} '
-                     f'L {xp-6:.0f} {y} Z" fill="#ffffff"/>'
+                     f'L {xp-6:.0f} {y} Z" fill="#ffffff">'
+                     f'<title>實際{lname}:{pr:,.0f}</title></path>'
                      f'<text x="{xp:.0f}" y="{y-10}" fill="#ffffff" font-size="12" '
                      f'font-weight="bold" text-anchor="middle">{pr:,.0f}</text>')
         y0 += hh
     return (f'<svg viewBox="0 0 {w} {h}" xmlns="http://www.w3.org/2000/svg" '
             f'style="width:100%;height:auto">{"".join(P)}</svg>')
+
+
+def _lane_legend(actual=False):
+    """泳道圖的色塊圖例(2026-09-01 使用者反映看不懂顏色/找不到價格)。"""
+    parts = ["<span style='color:#ef5350'>■</span>最高點",
+             "<span style='color:#7f8ea3'>■</span>收盤",
+             "<span style='color:#26a69a'>■</span>最低點",
+             "深色實心=<b>67%</b>", "淡色=<b>90%</b> 外緣", "豎線=中位",
+             "<span style='color:#f5d90a'>┊</span>錨點"]
+    if actual:
+        parts.insert(3, "◆白=實際發生值")
+        parts.append("<span style='color:#5a6470'>■</span>舊收盤帶=14:25 版")
+    return ("<p class='mut' style='margin:6px 0 0'>" + " · ".join(parts)
+            + " · 帶端數字=確切價格,<b>滑鼠停在帶上看完整數值</b></p>")
 
 
 def _lanes_from(spec):
@@ -1153,10 +1174,10 @@ def _scale_panel(gex, meta):
          "lanes": _lanes_from(CALIB["day"])},
     ])
     C_n, C_d = CALIB["night"], CALIB["day"]
-    foot = ("<p class='mut' style='margin:8px 0 0;line-height:1.8'>"
-            "<b style='color:#e6e8eb'>實心 = 67%</b>(單邊每 6 個交易日出界一次)· "
-            "<b style='color:#8b95a1'>淡色 = 90%</b>(每 20 日)· 豎線 = 中位 · "
-            f"黃虛線 = 錨點(今日結算 <b>{F:,.0f}</b>)。"
+    foot = (_lane_legend()
+            + "<p class='mut' style='margin:4px 0 0;line-height:1.8'>"
+            "67% = 單邊每 6 個交易日出界一次;90% = 每 20 日。"
+            f"錨點 = 今日結算 <b>{F:,.0f}</b>。"
             f"<br>「落空」= 該區間整段沒發生:夜盤 {C_n['whiff_hi']:.0f}%/{C_n['whiff_lo']:.0f}%,"
             f"日盤最高 <b>{C_d['whiff_hi']:.0f}%</b> / 最低 <b>{C_d['whiff_lo']:.0f}%</b>"
             " —— 隔夜跳空把價格帶走就不回來。"

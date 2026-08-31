@@ -55,7 +55,8 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import polars as pl                                            # noqa: E402
-from txo_gex_daily import (CALIB, TXO_ROOT, _svg_lanes, _card_html)  # noqa: E402
+from txo_gex_daily import (CALIB, TXO_ROOT, _svg_lanes, _card_html,  # noqa: E402
+                           _lane_legend)
 from config.lake_paths import kbar_paths                       # noqa: E402
 
 PLATFORM = _HERE.parent / "txf-quant-platform"
@@ -390,7 +391,7 @@ def build_morning_block(fc, night, target, weekend):
         f"σ′ = <b>{sp_raw:,.0f}</b> 點(σ 的 {sp_raw / sigma:.2f} 倍)· "
         f"收盤 67% 帶寬 &plusmn;{old_w / 2:,.0f} &rarr; <b>&plusmn;{new_w / 2:,.0f}</b>"
         f"({(new_w / old_w - 1) * 100:+.0f}%)</div>"
-        + svg + warn + card
+        + svg + _lane_legend(actual=True) + warn + card
         + f"<p class='mut' style='margin:6px 0 0'>來源 fc_{fc['date'].replace('-', '')}.json"
         f"(14:25 凍結)· 夜盤 5m {night['bars']}/{CALIB['EXP_BARS']} 根"
         f"({night['src']},至 {night['last_ts'][11:16]})· 夜盤 RV {night['rv_pts']:,.0f} 點"
