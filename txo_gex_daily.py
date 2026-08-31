@@ -1002,12 +1002,19 @@ def _scale_panel(gex, meta):
            f"<tr><td>收盤(80%)</td>"
            f"<td style='text-align:right'>{F-1.25*d1:,.0f} – {F+1.25*d1:,.0f}</td>"
            f"<td style='text-align:right'>&plusmn;{1.25*d1:,.0f}</td><td class='mut'>&plusmn;1.25&sigma;</td></tr>"
-           f"<tr><td><b>盤中會觸及</b></td>"
-           f"<td style='text-align:right'>低 <b>{F-0.54*d1:,.0f}</b> / 高 <b>{F+0.67*d1:,.0f}</b></td>"
-           f"<td style='text-align:right'>—</td><td class='mut'>各約半數日子</td></tr>"
+           f"<tr><td><b>最高點(67%)</b></td>"
+           f"<td style='text-align:right'><b>{F+0.15*d1:,.0f} – {F+1.30*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>中位 {F+0.67*d1:,.0f}</td>"
+           f"<td class='mut'>+0.15&sigma; ~ +1.30&sigma;</td></tr>"
+           f"<tr><td><b>最低點(67%)</b></td>"
+           f"<td style='text-align:right'><b>{F-1.27*d1:,.0f} – {F-0.05*d1:,.0f}</b></td>"
+           f"<td style='text-align:right'>中位 {F-0.54*d1:,.0f}</td>"
+           f"<td class='mut'>&minus;1.27&sigma; ~ &minus;0.05&sigma;</td></tr>"
            "</table>"
            "<p class='mut' style='margin:8px 0 0'>基準 = 今日 TXF 收盤 "
-           f"<b>{F:,.0f}</b>。校準自 633 天實測,非常態假設。</p></div>")
+           f"<b>{F:,.0f}</b>。全部校準自 641 天實測(非常態假設)。"
+           "<br>⚠️ 最高點有 <b>7.0%</b> 的日子低於前收(整天沒過前收)、"
+           "最低點有 <b>12.8%</b> 的日子高於前收(整天沒破前收)—— 單邊行情時區間會整段落空。</p></div>")
 
     STOP = [(0.75, 38.1), (1.00, 25.6), (1.50, 10.1), (2.00, 3.8)]
     srow = "".join(
@@ -1254,8 +1261,8 @@ def render_html(d, S, meta, gex, inst, expiries, pct=None):
         _F = _si["F"]
         d1_v = f"{_F-0.92*_d1:,.0f} – {_F+0.92*_d1:,.0f}"
         d1_sub = (f"&plusmn;{0.92*_d1:,.0f} 點 · 微台一口日風險 {_d1*10:,.0f} 元"
-                  "<br>盤中約會觸及 "
-                  f"<b>{_F-0.54*_d1:,.0f}</b> / <b>{_F+0.67*_d1:,.0f}</b>")
+                  f"<br>最高點 {_F+0.15*_d1:,.0f}–{_F+1.30*_d1:,.0f} · "
+                  f"最低點 {_F-1.27*_d1:,.0f}–{_F-0.05*_d1:,.0f}")
     else:
         iv_v = iv_sub = d1_v = d1_sub = "N/A"; iv_cls = "mut"
     if _rmed is not None:
