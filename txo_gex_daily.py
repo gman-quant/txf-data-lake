@@ -1700,6 +1700,28 @@ class _Tee:
         self.f.flush()
 
 
+def prune_reports(keep_days=30):
+    """滾動保留最近 keep_days 天的報表(2026-08-31 使用者指定)。
+
+    報表是**可重建的建置產物** —— 隨時能用 `--backfill ... --report-only`
+    從 quotes/ 的 parquet 重出,所以刪掉不損失任何資料。
+    錨點取 max(磁碟上最新一份, 今天):只用今天會讓「拿舊資料重跑」把整批清光,
+    只用最新一份則會在停跑很久之後永遠不縮。
+    """
+    rpt_dir = TXO_ROOT / "reports"
+    files = sorted(rpt_dir.glob("gex_*.html"))
+    if not files:
+        return
+    newest = max(max(f.stem[4:] for f in files), date.today().strftime("%Y%m%d"))
+    cut = (datetime.strptime(newest, "%Y%m%d").date() - timedelta(days=keep_days)).strftime("%Y%m%d")
+    gone = [f for f in files if f.stem[4:] < cut]
+    for f in gone:
+        f.unlink()
+    if gone:
+        print(f"[PRUNE] 保留 {keep_days} 天(>= {cut}),刪除 {len(gone)} 份:"
+              f"{gone[0].stem[4:]}~{gone[-1].stem[4:]}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", help="YYYY-MM-DD(預設今天)")
@@ -1709,6 +1731,7 @@ def main():
     ap.add_argument("--wait", action="store_true", help="輪詢等待資料公布(排程用)")
     ap.add_argument("--wait-until", default="16:30", help="輪詢截止時刻 HH:MM")
     ap.add_argument("--poll-sec", type=int, default=180, help="輪詢間隔秒數")
+    ap.add_argument("--keep-days", type=int, default=30, help="報表滾動保留天數(0=不清)")
     a = ap.parse_args()
     if a.wait:  # 排程模式:輸出另存日誌
         lp = TXO_ROOT / "logs" / f"run-{date.today()}.log"
@@ -1739,6 +1762,8 @@ def main():
                 write_gex_state(d, True, 1, mode="manual")
             verify_previous(d)
             backfill_institutional(d)
+    if a.keep_days > 0:
+        prune_reports(a.keep_days)
 
 
 if __name__ == "__main__":
