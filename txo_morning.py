@@ -223,7 +223,12 @@ def check_freshness(fc_date, night):
 
 
 def open_from_kafka(target):
-    """08:46 用:取 [08:45, 08:46:30) 的最後一筆成交價當 O。"""
+    """取 08:45:00 之後的**第一筆**成交 = 集合競價開盤價。
+
+    2026-09-01 修正:原版取 08:45–08:46:30 的末筆(「你螢幕上的價」),但
+    ① CALIB 的開盤錨係數是拿**真開盤價**校準的(band_common 的 1d Day open),
+    ② 使用者看盤軟體顯示的「開盤價」就是這筆 —— 印別的數字徒增困惑,
+    ③ 兩者差距中位 18 點、P90 75 點、最大 313 點(n=642)—— 尾巴上不可忽略。"""
     from confluent_kafka import Consumer, TopicPartition
     PbTick = _load_pb2()
     t0 = datetime.combine(target, datetime.min.time()).replace(hour=8, minute=45)
@@ -240,8 +245,8 @@ def open_from_kafka(target):
         if off < 0:
             return None
         c.assign([TopicPartition("txf-tick", 0, off)])
-        last, empt = None, 0
-        while True:
+        first, empt = None, 0
+        while first is None:
             m = c.poll(2.0)
             if m is None:
                 empt += 1
@@ -253,13 +258,25 @@ def open_from_kafka(target):
                 continue
             pb = PbTick()
             pb.ParseFromString(m.value())
-            if pb.timestamp_ms >= ms1:
+            if pb.timestamp_ms >= ms1:      # 視窗內沒有成交(不該發生)
                 break
             if pb.timestamp_ms >= ms0:
-                last = pb.close / 10000.0
+                first = pb.close / 10000.0  # 第一筆 = 開盤價
     finally:
         c.close()
-    return last
+    return first
+
+
+def open_from_lake(target):
+    """歷史重放:湖裡 target 日盤第一根 1m 的 **open** = 集合競價開盤價(與 Kafka 版同義)。"""
+    try:
+        fs = kbar_paths("1m", "TXF", target, target)
+        k = (pl.read_parquet(fs).with_columns(pl.col("date").cast(pl.Utf8))
+             .filter((pl.col("date") == target.isoformat()) & (pl.col("session") == "Day"))
+             .sort("ts"))
+    except Exception as e:
+        raise Abort(f"讀湖失敗:{e!r}")
+    return float(k["open"][0]) if k.height else None    # 首根 open ≡ 集合競價開盤(已驗 ≡ 1d open)
 
 
 def trading_days_between(d0, d1):
@@ -393,7 +410,7 @@ def build_open_block(O, sp, spec_key):
     return (
         f"{OB}\n<div class='panel' style='border-color:#26a69a;background:#10181a'>"
         f"<b style='font-size:18px'>☀️ 開盤定稿 {datetime.now().strftime('%H:%M')}</b>"
-        f"<span class='mut'> — O = <b>{O:,.0f}</b>(08:45–08:46 末筆),今日最終區間"
+        f"<span class='mut'> — O = <b>{O:,.0f}</b>(08:45 開盤價),今日最終區間"
         f"({'σ′ 版' if spec_key == 'card_sprime' else 'σ 版(無早報,連假後備援)'})</span>"
         f"<div style='margin-top:6px;font-size:17px;line-height:1.9'>"
         f"最高 67% <b>{g(hi[0])} ~ {g(hi[2])}</b>(中位 {g(hi[1])})· 90% {g(hi[3])}<br>"
@@ -517,17 +534,32 @@ def run_night(target, source, dry):
     return True
 
 
-def run_open(target, dry):
+def _morning_record(target):
+    """從不可變稽核 jsonl 找 target 最後一筆成功早報(比 state 可靠:state 只記最後一天,
+    亂序重放/隔日補跑都會讓它指錯 —— 2026-09-01 開盤層重打實測全退到 σ 版才抓到)。"""
     try:
-        st = json.loads(STATE.read_text(encoding="utf-8"))
-    except Exception:
-        st = {}
-    O = open_from_kafka(target)
+        rec = None
+        with HISTORY.open(encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                if r.get("target") == target.isoformat():
+                    rec = r
+        return rec
+    except OSError:
+        return None
+
+
+def run_open(target, dry, source="kafka"):
+    O = (open_from_kafka if source == "kafka" else open_from_lake)(target)
     if O is None:
-        raise Abort("抓不到 08:45–08:46 的成交價(還沒開盤?Kafka 斷線?)")
-    if st.get("last_target") == target.isoformat() and st.get("sigma_prime"):
-        sp, key = float(st["sigma_prime"]), "card_sprime"
-        fc_date = date.fromisoformat(st["fc_date"])
+        raise Abort("抓不到 08:45 的開盤成交(還沒開盤?Kafka 斷線?)")
+    rec = _morning_record(target)
+    if rec and rec.get("sigma_prime"):
+        sp, key = float(rec["sigma_prime"]), "card_sprime"
+        fc_date = date.fromisoformat(rec["fc"]["date"])
     else:                                             # 早報沒跑成(連假後 no-op 等)→ σ 版
         fc, fc_date, _gap = find_fc(target)
         sp, key = fc["sigma"], "card_sigma"
@@ -578,7 +610,7 @@ def main():
             return 0
     try:
         ok = run_night(target, a.source, a.dry_run) if a.mode == "night" \
-            else run_open(target, a.dry_run)
+            else run_open(target, a.dry_run, a.source)
         return 0 if ok else 1
     except Abort as e:
         print(f"[FAIL] {e}")

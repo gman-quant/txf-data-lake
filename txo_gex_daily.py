@@ -1973,7 +1973,8 @@ def main():
     ap.add_argument("--wait", action="store_true", help="輪詢等待資料公布(排程用)")
     ap.add_argument("--wait-until", default="16:30", help="輪詢截止時刻 HH:MM")
     ap.add_argument("--poll-sec", type=int, default=180, help="輪詢間隔秒數")
-    ap.add_argument("--keep-days", type=int, default=30, help="報表滾動保留天數(0=不清)")
+    ap.add_argument("--keep-days", type=int, default=400,
+                    help="報表滾動保留天數(0=不清)。2026-09-01 使用者改要全年份 → 400")
     a = ap.parse_args()
     if a.wait:  # 排程模式:輸出另存日誌
         lp = TXO_ROOT / "logs" / f"run-{date.today()}.log"
@@ -1989,7 +1990,8 @@ def main():
             if d.weekday() < 5:
                 if run_one(d, force=a.force, report_only=a.report_only):
                     ok += 1
-                time.sleep(2)  # 對 TAIFEX 客氣
+                if not a.report_only:
+                    time.sleep(2)          # 對 TAIFEX 客氣;純重放不碰遠端,不用等
             d += timedelta(days=1)
         print(f"[SUMMARY] backfill {d0}~{d1} 完成 {ok} 天")
     else:
