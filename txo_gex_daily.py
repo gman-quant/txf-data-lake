@@ -1000,6 +1000,7 @@ CALIB = {
     "card_sprime": {"hi": (+0.12, +0.41, +0.87, +1.28), "lo": (-1.49, -0.39, -0.12, -0.89),
                     "cl67": 0.59, "cl90": 1.09},
     "W": 0.6, "NR_MED": 0.5676,       # nr 中位(IV 樣本;RV 樣本 0.5636 → 尺可移植)
+    "W_PARK": 0.4, "NR_MED_PARK": 0.526,  # 降級路徑:夜盤 5m 不足時用 Parkinson 振幅
     "MONDAY_X": 1.13,                 # 週六早報(產週一)帶寬乘數;95%CI [1.05,1.22]
     "MIN_BARS": 150, "EXP_BARS": 168,  # 夜盤 5m 完整性閘:<150 根降級 Parkinson w=0.4
     # 停損:(寬度σ, 多單被掃%, 空單被掃%, 被掃後收盤回錨點上%)。錨=今日結算。
@@ -1754,6 +1755,19 @@ def write_gex_state(d, ok, attempts, mode="wait"):
     st.update({"last_run": now, "last_date": str(d), "last_ok": bool(ok),
                "last_attempts": attempts, "last_mode": mode,
                "lake_has_trading_day": trading, "note": ""})
+    # 早報(txo_morning,05:05 獨立排程)的健康折進同一份 state ——
+    # daily_sync 讀整個 dict,這裡搭便車就能上 13:50 的 SUMMARY,不必改 daily_sync。
+    try:
+        mst = json.loads((TXO_ROOT / "logs" / "morning_state.json").read_text(encoding="utf-8"))
+        st["morning"] = {"last_ok": mst.get("last_ok"),
+                         "fails": mst.get("consecutive_failures"),
+                         "last_run": mst.get("last_run"),
+                         "target": mst.get("last_target"), "note": mst.get("note", "")}
+        if (mst.get("consecutive_failures") or 0) >= 2:
+            print(f"[WARN] 早報連續失敗 {mst['consecutive_failures']} 次"
+                  f"(最後 {mst.get('last_run')}:{mst.get('note','')})—— 查 txo_morning")
+    except Exception:
+        pass
     if ok:
         st["last_ok_date"] = str(d)
         st["last_ok_ts"] = now
