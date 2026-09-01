@@ -595,7 +595,14 @@ def _morning_record(target):
 def run_open(target, dry, source="kafka"):
     O = (open_from_kafka if source == "kafka" else open_from_lake)(target)
     if O is None:
-        raise Abort("抓不到 08:45 的開盤成交(還沒開盤?Kafka 斷線?)")
+        # 今日尚無 ≥08:45 成交:假日、還沒開盤、或 producer 未啟。前兩者是常態;
+        # 第三種由 13:50 湖缺口告警兜底 —— 這裡 no-op 不計失敗,避免連假湊出假警報
+        # (夜盤那支的同款教訓,2026-09-01 上排程前補)。
+        print(f"[NOOP] {target} 尚無 08:45 之後的成交(假日/未開盤/producer 未啟)"
+              f"→ 不出開盤定稿,不計失敗")
+        if not dry:
+            write_state(True, f"no open trade yet for {target}", mode="open")
+        return True
     rec = _morning_record(target)
     if rec and rec.get("sigma_prime"):
         sp, key = float(rec["sigma_prime"]), "card_sprime"
