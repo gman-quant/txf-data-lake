@@ -37,6 +37,7 @@ import sys
 import os
 import json
 import math
+import time
 import uuid
 import argparse
 import traceback
@@ -228,6 +229,11 @@ def check_freshness(fc_date, night):
 def open_from_kafka(target):
     """取 08:45:00 之後的**第一筆**成交 = 集合競價開盤價。
 
+    2026-09-01 改為**有界等待**(使用者:開盤價 08:45 就有,別拖):排程可排 08:45,
+    查不到就每 2 秒重查,最多等到 08:46:15(晚跑另有 75 秒寬限)—— 競價 tick 一進
+    Kafka 立刻出報;假日等完照樣回 None(no-op)。單發不重試的舊版會把
+    「排程比 tick 早半秒」變成整天缺定稿。
+
     2026-09-01 修正:原版取 08:45–08:46:30 的末筆(「你螢幕上的價」),但
     ① CALIB 的開盤錨係數是拿**真開盤價**校準的(band_common 的 1d Day open),
     ② 使用者看盤軟體顯示的「開盤價」就是這筆 —— 印別的數字徒增困惑,
@@ -240,13 +246,18 @@ def open_from_kafka(target):
     c = Consumer({"bootstrap.servers": KAFKA_BROKER, "group.id": f"txo-open-{uuid.uuid4()}",
                   "enable.auto.commit": False, "socket.timeout.ms": 10000})
     try:
-        try:
-            res = c.offsets_for_times([TopicPartition("txf-tick", 0, int(ms0))], timeout=15)
-        except Exception as e:
-            raise Abort(f"Kafka 連線/查詢失敗:{e!r}")
-        off = res[0].offset
-        if off < 0:
-            return None
+        deadline = max(time.time() + 75, ms0 / 1000 + 90)   # 早跑等到 08:46:15;晚跑寬限 75s
+        while True:
+            try:
+                res = c.offsets_for_times([TopicPartition("txf-tick", 0, int(ms0))], timeout=15)
+            except Exception as e:
+                raise Abort(f"Kafka 連線/查詢失敗:{e!r}")
+            off = res[0].offset
+            if off >= 0:
+                break
+            if time.time() >= deadline:
+                return None                       # 等完仍無 ≥08:45 成交 → 假日/未開盤
+            time.sleep(2)
         c.assign([TopicPartition("txf-tick", 0, off)])
         first, empt = None, 0
         while first is None:
