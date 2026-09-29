@@ -328,12 +328,16 @@ def to_mult(pts, F, sigma):
     return (pts - F) / sigma
 
 
-def build_morning_block(fc, night, target, weekend):
+def build_morning_block(fc, night, target, weekend, gap=None):
     """組出 MORNING-BEGIN..END 的 HTML。回 (html, record)。
 
     MONDAY_X 只乘**夜盤錨的日盤帶**(它是對這組量校準的);
     開盤錨的卡與 state 存的 sigma_prime 用未乘版 —— 開盤錨連假後都不受影響(CALIB 註解),
     週末更不需要放寬(2026-09-01 審查修正:原版外溢到卡,重複放寬 13%)。
+
+    `gap` = 目標日 − 錨點夜盤那天(日曆天)。> 3 = 中間有平日休市(連假後),
+    警告改成連假版並放在圖的上方(2026-09-29:原本只有週末那句,連假後第一個交易日
+    沒有講清楚「這組帶不可靠、以開盤定稿為準」)。
     """
     F, sigma = fc["F"], fc["sigma"]
     sp_raw, mode = sigma_prime(sigma, night)
@@ -382,8 +386,21 @@ def build_morning_block(fc, night, target, weekend):
             nb["cl67"][0] <= night["C"] <= nb["cl67"][1],
             nb["lo"][3] <= night["L"] <= nb["lo"][2]]
     score = "".join("✅" if h else "❌" for h in hits)
-    warn = ""
-    if weekend:
+    warn = holiday_warn = ""
+    if gap is not None and gap > 3:
+        # 連假後(gap 4–5;> 5 在 run_night 直接不出報)。夜盤錨在這種日子最不可靠,
+        # 而 ×1.13 是對週末(gap = 3)校準的 —— 放寬救不了錨點過期,解法是換錨。
+        fd = date.fromisoformat(fc["date"])
+        off = sum(1 for i in range(1, gap) if (fd + timedelta(days=i)).weekday() < 5)
+        holiday_warn = (
+            "<p class='neg' style='margin:6px 0 0;font-size:16px'>⚠️ <b>連假後第一個交易日:"
+            "下方日盤帶只供參考,08:45 開盤定稿出來後以定稿為準。</b></p>"
+            "<p class='warn' style='margin:2px 0 0'>"
+            f"這組帶的錨點是 {fc['date']} 的夜盤收盤(距今 {gap} 天,中間休市 {off} 個平日)。"
+            "連假後以夜盤收盤為錨,67% 帶歷史上只蓋到約 37%;以開盤價為錨仍有約 70%"
+            "(連假期間的消息在開盤集合競價一次反映完)。帶寬雖已 ×1.13,"
+            "那是週末的校準值,不是連假的 —— 放寬救不了錨點過期。</p>")
+    elif weekend:
         warn = ("<p class='warn' style='margin:6px 0 0'>⚠️ 跨週末:日盤帶寬已 ×1.13"
                 "(開盤換算卡不乘 —— 開盤錨不受間隔影響)。開盤後以卡為準。"
                 "若週一適逢休市,本更新不適用。</p>")
@@ -404,7 +421,7 @@ def build_morning_block(fc, night, target, weekend):
         f"σ′ = <b>{sp_raw:,.0f}</b> 點(σ 的 {sp_raw / sigma:.2f} 倍)· "
         f"收盤 67% 帶寬 &plusmn;{old_w / 2:,.0f} &rarr; <b>&plusmn;{new_w / 2:,.0f}</b>"
         f"({(new_w / old_w - 1) * 100:+.0f}%)</div>"
-        + svg + _lane_legend(actual=True, oldband=True) + warn + card
+        + holiday_warn + svg + _lane_legend(actual=True, oldband=True) + warn + card
         + f"<p class='mut' style='margin:6px 0 0'>來源 fc_{fc['date'].replace('-', '')}.json"
         f"(14:25 凍結)· 夜盤 5m {night['bars']}/{CALIB['EXP_BARS']} 根"
         f"({night['src']},至 {night['last_ts'][11:16]})· 夜盤 RV {night['rv_pts']:,.0f} 點"
@@ -567,7 +584,7 @@ def run_night(target, source, dry):
         return True
     check_freshness(fc_date, night)
     weekend = gap >= 3
-    block, rec = build_morning_block(fc, night, target.isoformat(), weekend)
+    block, rec = build_morning_block(fc, night, target.isoformat(), weekend, gap)
     if dry:
         print(json.dumps({k: v for k, v in rec.items() if k != "fc"},
                          ensure_ascii=False, indent=1))
@@ -579,7 +596,8 @@ def run_night(target, source, dry):
                                  "bars": night["bars"], "fc_date": fc_date.isoformat()})
     print(f"[OK] 早報 {target} ← 夜盤{fc_date}({night['bars']}/{CALIB['EXP_BARS']} 根,"
           f"{rec['mode']})σ′={rec['sigma_prime']:,.0f} → {fp.name}"
-          + (" [跨週末:日盤帶×1.13]" if weekend else ""))
+          + (f" [連假後 gap={gap}:日盤帶只供參考,以開盤定稿為準]" if gap > 3
+             else " [跨週末:日盤帶×1.13]" if weekend else ""))
     return True
 
 
